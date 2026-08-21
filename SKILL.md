@@ -1,7 +1,7 @@
 ---
 name: deepseek-web-search
 description: DeepSeek 联网搜索技能。遇到实时信息、事实核查、新闻、价格、代码报错、未知名词或用户说“搜一下”时，必须使用本技能搜索并附来源。
-version: 1.12.0
+version: 1.12.1
 updated: 2026-08-21
 author: user
 license: MIT
@@ -94,6 +94,8 @@ tags: [web, search, deepseek, 联网, 搜索]
 **每步输出状态**：`screenshot`（最新截图路径）+ `screen`（视口尺寸/整页尺寸/DPR/鼠标位置/滚动位置——你据此判断坐标）+ `screenshots_used/max`（成本计数）+ `api_hint`（官方 API 参数照抄即可拼请求：base64 内联、detail 等级、384 token 封顶）。
 
 **成本防护**：`--max-screenshots`（默认 30）封顶截图数，超限自动停截图只报状态；`--shot-detail low` 用 512×512 省钱模式。别每动一下就截一张——先看屏幕信息判断，必要时才截。
+
+**兜底（你挂了它也不会挂）**：会话总时长上限 `--vision-timeout`（默认 900s）；120s 收不到你的下一条指令 = 判定你断线，自动收尾退出；任何指令异常只回 failed 不崩会话；进程绝不因调用方故障挂死。
 
 ## 依赖安装（AI 自动处理，不要让用户手动装）
 
