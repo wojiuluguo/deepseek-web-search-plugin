@@ -21,15 +21,23 @@ OpenClaw Skill：让 DeepSeek 模型能搜索、会搜索、并且"该搜就搜"
 
 ## 安装
 
+仓库仅 ~54KB 纯文本（无大二进制），克隆秒下；Chromium 等大件依赖由安装脚本从官方源安装。
+
 ```bash
 git clone https://github.com/wojiuluguo/deepseek-web-search-plugin.git
 cd deepseek-web-search-plugin
 python install_dependencies.py     # Windows 可直接双击 install_deps.bat
 ```
 
-自动安装：`playwright`、`yt-dlp`、Chromium 内核，并检查 ffmpeg（可选）。
+**AI Agent 一键部署**（OpenClaw / 其他 agent 直接执行）：
 
-作为 OpenClaw 技能使用时，把仓库放到 `~/.openclaw/workspace/skills/deepseek-web-search`，然后 `openclaw skills list` 验证。
+```bash
+git clone --depth 1 https://github.com/wojiuluguo/deepseek-web-search-plugin.git ~/.openclaw/workspace/skills/deepseek-web-search && cd ~/.openclaw/workspace/skills/deepseek-web-search && python install_dependencies.py
+```
+
+`--depth 1` 只拉最新提交，克隆更快。装完 `openclaw skills list` 应能看到 `deepseek-web-search`，AI 入口读 [SKILL.md](SKILL.md)。
+
+> 国内 GitHub 慢时可换加速镜像：`git clone --depth 1 https://ghproxy.net/https://github.com/wojiuluguo/deepseek-web-search-plugin.git`
 
 ## 快速用法
 
