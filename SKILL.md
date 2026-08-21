@@ -89,7 +89,7 @@ tags: [web, search, deepseek, 联网, 搜索]
 {"action":"elements"}
 {"action":"goto","url":"https://..."}
 {"action":"wait","ms":800}
-{"action":"eval","js":"document.title"}
+{"action":"eval","js":"document.title"}   // 执行 JS（>10s 疑似死循环会自动重置页面，会话保活，重新 goto 即可）
 {"action":"viewport","width":1280,"height":800}  // 改视口（默认 800×800=DeepSeek 视觉原生分辨率；改完坐标基准变了要重新 elements）
 {"action":"shot_policy","every":3}               // 截图节奏：每 3 个成功动作截 1 张（默认 1=动一次拍一次）
 {"action":"shot_policy","interval_ms":1000}      // 空闲时每秒自动截 1 张（默认 0=关；预算耗尽自动停）

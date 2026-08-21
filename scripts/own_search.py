@@ -315,7 +315,16 @@ def cmd_download(args):
         cmd += ["--output-dir", args.output_dir]
     if getattr(args, "safe", False):
         cmd.append("--safe")
-    proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore")
+    try:
+        # 大文件+chain 多路兜底可能很久，给 30 分钟上限防挂死
+        proc = subprocess.run(cmd, capture_output=True, text=True,
+                              encoding="utf-8", errors="ignore", timeout=1800)
+    except subprocess.TimeoutExpired:
+        print(json.dumps({"ok": False, "error": "下载超时(>1800s)，已中止"}, ensure_ascii=False))
+        return 1
+    except Exception as exc:
+        print(json.dumps({"ok": False, "error": f"下载进程异常: {exc}"}, ensure_ascii=False))
+        return 1
     if proc.stdout:
         print(proc.stdout)
     if proc.stderr:
@@ -335,7 +344,16 @@ def cmd_seed(args):
         str(args.max_results),
         "--json",
     ]
-    proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore")
+    try:
+        # 浏览器版搜索最坏 ~240s，给 300s 上限防挂死
+        proc = subprocess.run(cmd, capture_output=True, text=True,
+                              encoding="utf-8", errors="ignore", timeout=300)
+    except subprocess.TimeoutExpired:
+        print(json.dumps({"ok": False, "error": "外部搜索超时(>300s)，种子发现中止"}, ensure_ascii=False))
+        return 1
+    except Exception as exc:
+        print(json.dumps({"ok": False, "error": f"搜索进程异常: {exc}"}, ensure_ascii=False))
+        return 1
     try:
         data = json.loads(proc.stdout)
     except Exception:

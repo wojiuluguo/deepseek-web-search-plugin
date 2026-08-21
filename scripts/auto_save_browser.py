@@ -2122,7 +2122,7 @@ CAPTCHA_JS = """
     const sigs = {
         geetest: ['.geetest_holder', '.geetest_widget', 'iframe[src*="geetest"]'],
         recaptcha: ['.recaptcha-checkbox', 'iframe[src*="recaptcha"]', '.g-recaptcha'],
-        hcaptpcha: ['iframe[src*="hcaptcha"]', '.h-captcha'],
+        hcaptcha: ['iframe[src*="hcaptcha"]', '.h-captcha'],
         slider: ['.slider', '.slide-verify', '.nc_wrapper', '[class*="captcha"]'],
         rotate: ['.rotate-captcha', '[class*="rotate"]'],
     };
@@ -2147,10 +2147,47 @@ CAPTCHA_JS = """
 """
 
 
+def _free_port() -> int:
+    """挑一个本机空闲端口（视觉会话给浏览器开本地 DevTools 调试口用）。"""
+    import socket
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+def _eval_watchdog_thread(debug_port: int, timeout_s: float, cancelled, fired) -> None:
+    """eval 看门狗：超时仍未被取消时，经 DevTools HTTP 端点强杀全部 page target。
+
+    为什么走 HTTP /json/close：卡死的 renderer（如 while(true)）不响应任何
+    协议消息，但浏览器进程本身还活着，直接处理 /json/list 和 /json/close；
+    页面一关，主线程阻塞中的 page.evaluate 立刻以 "Target closed" 解卡。
+    纯 stdlib 实现，不需要 renderer 配合，也不受 Playwright 跨线程限制。"""
+    if cancelled.wait(timeout_s):
+        return  # eval 已按时返回，看门狗无事可做
+    base = f"http://127.0.0.1:{debug_port}"
+    try:
+        targets = json.load(urllib.request.urlopen(f"{base}/json/list", timeout=5))
+        closed = 0
+        for t in targets:
+            if t.get("type") == "page":
+                try:
+                    urllib.request.urlopen(f"{base}/json/close/{t['id']}", timeout=5)
+                    closed += 1
+                except Exception:
+                    pass
+        if closed:
+            fired.set()
+    except Exception:
+        pass  # 看门狗自身失败不影响主流程（退化为原始行为：eval 一直阻塞）
+
+
 def _vision_exec_action(page, cmd: Dict, output_dir: Path, prefix: str,
-                        wait_cap_ms: int = 0) -> Dict:
+                        wait_cap_ms: int = 0, debug_port: int = 0) -> Dict:
     """执行一条视觉会话指令，返回 {ok, note}。指令格式见 _vision_route 文档。
-    wait_cap_ms>0 时 wait 指令的毫秒数被钳到该值（会话剩余预算），防长 wait 拖爆总超时。"""
+    wait_cap_ms>0 时 wait 指令的毫秒数被钳到该值（会话剩余预算），防长 wait 拖爆总超时。
+    debug_port>0 时 eval 指令带死循环看门狗（超时强杀页面，会话保活）。"""
     act = (cmd.get("action") or "").strip().lower()
     # 坐标类动作必须显式给 x/y：缺坐标默认 (0,0) 会盲点到 BODY 上还"假成功"
     if act in ("click", "dblclick", "right_click", "move") and ("x" not in cmd or "y" not in cmd):
@@ -2237,7 +2274,35 @@ def _vision_exec_action(page, cmd: Dict, output_dir: Path, prefix: str,
             els = page.evaluate(ELEMENTS_JS) or []
             return {"ok": True, "note": "", "elements": els}
         elif act == "eval":
-            val = page.evaluate(str(cmd.get("js", "1+1")))
+            # 防死循环卡死会话：evaluate 必须在主线程跑（Playwright sync API
+            # 禁止跨线程调用），另起看门狗线程盯梢——10s 不返回就经 DevTools
+            # HTTP 端点强杀页面，阻塞中的 evaluate 随即抛 "Target closed" 解卡；
+            # 调用方收到 _page_dead 后重建页面，会话保活（AI 重新 goto 即可）
+            import threading as _th
+            js = str(cmd.get("js", "1+1"))
+            cancelled, fired = _th.Event(), _th.Event()
+            wt = None
+            if debug_port:
+                wt = _th.Thread(target=_eval_watchdog_thread,
+                                args=(debug_port, 10, cancelled, fired), daemon=True)
+                wt.start()
+            try:
+                val = page.evaluate(js)
+            except Exception as exc:
+                cancelled.set()
+                if wt:
+                    wt.join(5)
+                if fired.is_set():
+                    return {"ok": False, "_page_dead": True,
+                            "note": "eval 超时(>10s)：疑似死循环 JS，页面已重置（会话保留，请重新 goto）"}
+                return {"ok": False, "note": f"eval 失败: {str(exc)}"[:300]}
+            cancelled.set()
+            if wt:
+                wt.join(5)
+            if fired.is_set() or page.is_closed():
+                # 竞态兜底：eval 刚返回但看门狗已开杀 → 同样走页面重建
+                return {"ok": False, "_page_dead": True,
+                        "note": "eval 超时(>10s)：页面已重置（会话保留，请重新 goto）"}
             # data 字段给结构化结果（note 是纯文本给 AI 看的）
             return {"ok": True, "note": f"eval: {val}"[:400], "data": val}
         elif act in ("screenshot", "quit"):
@@ -2341,7 +2406,12 @@ def _vision_route(url: str, output_dir: Path, headed: bool = False, safe: bool =
 
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=not headed, args=_browser_launch_args(safe))
+            # 本地调试端口：eval 看门狗用它经 /json/close 强杀死循环页面
+            # （仅绑 127.0.0.1，无对外暴露；其他路线不开，避免多余端口）
+            debug_port = _free_port()
+            browser = p.chromium.launch(
+                headless=not headed,
+                args=_browser_launch_args(safe) + [f"--remote-debugging-port={debug_port}"])
             try:
                 context = browser.new_context(
                     user_agent=random.choice(USER_AGENTS),
@@ -2480,7 +2550,25 @@ def _vision_route(url: str, output_dir: Path, headed: bool = False, safe: bool =
                     # wait 钳到剩余预算：超时检查在指令间隙，长 wait 会拖爆总超时
                     remaining_ms = int((session_timeout_sec - (time.time() - session_start)) * 1000)
                     r = _vision_exec_action(page, cmd, output_dir, "vision",
-                                            wait_cap_ms=max(0, remaining_ms))
+                                            wait_cap_ms=max(0, remaining_ms),
+                                            debug_port=debug_port)
+                    if r.get("_page_dead"):
+                        # eval 死循环兜底：看门狗已杀掉卡死页面，context 还活着，
+                        # 这里直接重建空白页，会话保活（AI 重新 goto 即可）
+                        try:
+                            page = context.new_page()
+                        except Exception:
+                            # context 也没了：输出收尾状态后走异常路径，
+                            # finally 里 browser.close() 正常清理，绝不挂死
+                            print(json.dumps({
+                                "event": "state", "done": True,
+                                "screenshot": all_shots[-1] if all_shots else None,
+                                "screenshots_used": shots_used, "screenshots_max": max_screens,
+                                "note": "eval 死循环且页面无法重建，会话自动收尾",
+                            }, ensure_ascii=False), flush=True)
+                            raise
+                        _emit_state(page, note=r.get("note", "页面已重置"), shoot=False)
+                        continue
                     if act == "screenshot":
                         r = {"ok": True, "note": ""}
                     if act in ("goto", "reload", "back", "forward"):
