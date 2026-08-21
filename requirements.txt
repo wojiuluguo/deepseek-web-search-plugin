@@ -1,0 +1,11 @@
+# DeepSeek Web Search Skill 依赖
+# 直接运行: pip install -r requirements.txt
+# 或一键安装: python install_dependencies.py / 双击 install_deps.bat
+
+playwright>=1.40.0
+yt-dlp>=2024.0.0
+
+# 可选 API 源（只需要环境变量，不涉及 pip 包）：
+#   TAVILY_API_KEY
+#   BRAVE_API_KEY
+#   SEARXNG_BASE_URL

@@ -1,0 +1,12 @@
+# Python
+__pycache__/
+*.pyc
+
+# 本地运行产物
+index/*.db
+downloads/cache/*
+!downloads/cache/.gitkeep
+
+# 临时/测试
+scripts/_tmp*
+*.log
