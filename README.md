@@ -21,6 +21,14 @@ An [OpenClaw](https://github.com/openclaw) skill that gives DeepSeek real web se
 
 Default search engines: Bing, Sogou, 360, Baidu (China-first); DuckDuckGo only for external/manual queries; optional Tavily, Brave Search, SearXNG (auto-enabled via environment variables).
 
+## Network Environment Note
+
+**This tool was developed and tested entirely on mainland China network infrastructure.** We have **not** tested it on networks outside mainland China.
+
+- If you use it on overseas or other network environments, engine timeouts or unexpected results may occur — your understanding is appreciated.
+- On overseas networks, try `--engines ddg,brave` first for better reachability.
+- Support for networks outside mainland China may be added in future versions.
+
 ## Installation
 
 The repo is ~54KB of pure text (no large binaries) — clones in seconds. Heavy dependencies like Chromium are installed by the setup script from official sources.
@@ -153,6 +161,7 @@ deepseek-web-search-plugin/
 
 ## Known Limitations
 
+- **Network environment**: tested entirely on mainland China networks; untested on overseas networks, where some features may not work (see "Network Environment Note" above).
 - Bilibili m4s segmented streams and some blob/MSE videos can't be reassembled from browser cache alone; the script auto-falls back to yt-dlp.
 - No anti-bot approach is 100% reliable; browser emulation greatly reduces detection but strongly protected sites may still fail.
 - App-funnel pages (only app-store redirects, no real files) honestly report `app_only: true` — the site itself offers no web download; this is not a script defect.
