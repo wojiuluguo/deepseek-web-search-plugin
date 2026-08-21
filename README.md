@@ -1,5 +1,7 @@
 # deepseek-web-search
 
+**English summary**: An [OpenClaw](https://github.com/openclaw) skill that gives DeepSeek real web search (multi-engine + browser-emulated + cross-validation + local index) **and** an auto-save browser that downloads videos/audio/images/files from any webpage it opens. Includes a 5-level download fallback chain, app-store funnel detection (`app_only`), ad filtering, 3-tier dedup, and ffmpeg-verified captures. Pure Python, ~54KB repo, one-command install. 中文文档如下。
+
 OpenClaw Skill：让 DeepSeek 模型能搜索、会搜索、并且"该搜就搜"，还能自动下载网页里的视频/音频/图片/文件。
 
 > 当前版本 **v1.11.1**（2026-08-21）
