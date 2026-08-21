@@ -2021,9 +2021,11 @@ def _capture_full_page(page, output_dir: Path, prefix: str = "page",
 
 
 def _shot_viewport(page, output_dir: Path, prefix: str = "screen") -> Optional[str]:
-    """当前视口截图（视觉会话每步操作后的"屏幕快照"）。"""
+    """当前视口截图（视觉会话每步操作后的"屏幕快照"）。
+    文件名时间戳+序号双保险，同毫秒多张不互相覆盖。"""
     output_dir.mkdir(parents=True, exist_ok=True)
-    p = output_dir / f"{prefix}_{int(time.time() * 1000)}.png"
+    _shot_viewport._seq = getattr(_shot_viewport, "_seq", 0) + 1
+    p = output_dir / f"{prefix}_{int(time.time() * 1000)}_{_shot_viewport._seq:03d}.png"
     try:
         page.screenshot(path=str(p))
         return str(p)
@@ -2116,7 +2118,8 @@ def _vision_exec_action(page, cmd: Dict, output_dir: Path, prefix: str) -> Dict:
 
 def _vision_route(url: str, output_dir: Path, headed: bool = False, safe: bool = False,
                   max_screens: int = VISION_DEFAULT_MAX_SCREENS,
-                  detail: str = "original", model: str = "") -> Dict:
+                  detail: str = "original", model: str = "",
+                  session_timeout_sec: int = 900) -> Dict:
     """视觉会话模式（--method vision）：给多模态模型的"眼睛+手"。
 
     协议（stdin/stdout 各一行一个 JSON，AI Agent 驱动）：
@@ -2134,6 +2137,12 @@ def _vision_route(url: str, output_dir: Path, headed: bool = False, safe: bool =
          {"action":"eval","js":"1+1"}           执行 JS（只读用途，返回值放 note）
          {"action":"quit"}                      结束会话
       3. 每条指令执行后 stdout 输出新状态（新截图 + 屏幕信息），直到 quit 或 stdin 关闭
+
+    兜底（防 AI 侧故障拖死本进程）：
+      - 会话总时长上限 session_timeout_sec（默认 900s）：超时自动收尾退出，
+        绝不因 AI 卡死/不发 quit 变僵尸进程；
+      - 指令间隔看门狗：连续 120s 收不到下一条指令视为 AI 断线，自动收尾退出；
+      - 任何单条指令异常都返回 failed 状态继续会话，不会整体崩溃。
 
     状态 JSON 字段：
       event="state" | screenshot=最新截图路径 | screen=屏幕信息（视口/整页尺寸/DPR/鼠标/滚动）
@@ -2192,8 +2201,40 @@ def _vision_route(url: str, output_dir: Path, headed: bool = False, safe: bool =
                 page.goto(url, wait_until="domcontentloaded", timeout=30000)
                 _wait_for_render(page)
                 _emit_state(page)
-                # 指令循环：stdin 逐行 JSON → 执行 → 输出新状态（EOF/quit 退出）
-                for line in sys.stdin:
+                # 指令循环：stdin 逐行 JSON → 执行 → 输出新状态（EOF/quit 退出）。
+                # 看门狗兜底（跨平台方案：读线程+队列，Windows 的 stdin 不是 socket
+                # 用不了 selectors）：AI 卡死不发指令（120s 断线）或会话超总时长
+                # （默认 900s）都自动收尾退出——绝不因调用方故障变成挂死进程
+                import queue as _queue
+                import threading as _threading
+
+                cmd_q: "queue.Queue[Optional[str]]" = _queue.Queue()
+
+                def _stdin_reader():
+                    try:
+                        for ln in sys.stdin:
+                            cmd_q.put(ln)
+                    except Exception:
+                        pass
+                    finally:
+                        cmd_q.put(None)  # EOF/异常统一哨兵
+
+                reader = _threading.Thread(target=_stdin_reader, daemon=True)
+                reader.start()
+                session_start = time.time()
+                idle_limit = 120  # 连续 120s 无下一条指令 = AI 断线
+                while True:
+                    if time.time() - session_start > session_timeout_sec:
+                        _emit_state(page, done=True, note="session timeout (overall cap)")
+                        break
+                    try:
+                        line = cmd_q.get(timeout=idle_limit)
+                    except _queue.Empty:
+                        _emit_state(page, done=True, note="idle watchdog: no command in 120s, AI side disconnected?")
+                        break
+                    if line is None:  # EOF：stdin 关闭
+                        _emit_state(page, done=True, note="stdin closed")
+                        break
                     line = line.strip()
                     if not line:
                         continue
@@ -2536,6 +2577,7 @@ def auto_save_url(
     vision_max_screens: int = VISION_DEFAULT_MAX_SCREENS,
     vision_detail: str = "original",
     model_name: str = "",
+    vision_timeout: int = 900,
 ) -> Dict:
     """
     核心逻辑：
@@ -2601,7 +2643,7 @@ def auto_save_url(
     if method == "vision":
         return _vision_route(url, output_dir, headed=headed, safe=safe,
                              max_screens=vision_max_screens, detail=vision_detail,
-                             model=model_name)
+                             model=model_name, session_timeout_sec=vision_timeout)
 
     # direct：只尝试直接下载直链媒体文件。
     if method == "direct":
@@ -3139,6 +3181,12 @@ def main(argv=None):
         help=f"视觉会话单次截图数上限（成本防护，默认 {VISION_DEFAULT_MAX_SCREENS}：每张≤384 token，防失控烧钱）",
     )
     parser.add_argument(
+        "--vision-timeout",
+        type=int,
+        default=900,
+        help="视觉会话兜底：会话总时长上限秒数（默认 900=15分钟）。超时/AI 断线 120s 无指令都自动收尾退出，绝不挂死进程",
+    )
+    parser.add_argument(
         "--zip",
         action="store_true",
         help="files 路线专用：页面多个文件下载完后打包成单个 zip（默认保留散文件不打包）",
@@ -3203,6 +3251,7 @@ def main(argv=None):
                 vision_max_screens=args.max_screenshots,
                 vision_detail=args.shot_detail,
                 model_name=args.model or "",
+                vision_timeout=args.vision_timeout,
             )
             # 自动选到 harvest/files 但颗粒无收：退回通用链再试一次（chain 自带优雅降级）。
             if auto_routed and data.get("count", 0) == 0 and not args.click_download:
