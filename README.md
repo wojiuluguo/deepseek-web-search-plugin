@@ -4,9 +4,9 @@ English | **[中文](README.zh-CN.md)**
 
 An [OpenClaw](https://github.com/openclaw) skill that gives DeepSeek real web search **and** an auto-save browser that downloads videos/audio/images/files from any webpage it opens — plus a vision mode for multimodal models (see a page, operate a page).
 
-> Current version **v1.12.5** (2026-08-22) · Author: user · [Changelog](#changelog)
+> Current version **v1.12.6** (2026-08-22) · Author: user · [Changelog](#changelog)
 
-<p align="center"><img src=".github/mascot.png" alt="deepseek-web-search mascot" width="220"></p>
+<p align="center"><img src="assets/mascot.png" alt="deepseek-web-search mascot" width="220"></p>
 
 ## Feature Overview
 
@@ -191,6 +191,13 @@ deepseek-web-search-plugin/
 
 ## Changelog
 
+### v1.12.6 (2026-08-22)
+
+Repo sync fix:
+
+- **Fixed: default branch was stale.** Releases were pushed to `master` while GitHub's default branch `main` still showed v1.12.3 — `main` is now fast-forwarded to the latest and `master` removed, single-branch from now on.
+- Mascot moved from `.github/` to `assets/` for reliable README image rendering on GitHub (hidden dot-folders render inconsistently).
+
 ### v1.12.5 (2026-08-22)
 
 Vision session robustness + repository polish:
@@ -198,7 +205,7 @@ Vision session robustness + repository polish:
 - Vision session: `--method vision` startup now includes `vision_capable` and `model` fields in the first state line (AI can immediately detect whether it supports vision).
 - Vision session: `eval` instruction gets a 10s deadlock watchdog — if user-supplied JS contains `while(true){}` or similar hang, the DevTools HTTP `/json/close` endpoint kills the page and the session is rebuilt automatically (no more permanent session freeze).
 - Bug fix: `own_search.py download` and `own_search.py seed` now have subprocess timeouts (1800s / 300s) so a stuck downstream no longer freezes the parent.
-- Repo: added project mascot at `.github/mascot.png`, embedded in both README pages.
+- Repo: added project mascot (now at `assets/mascot.png`), embedded in both README pages.
 
 ### v1.12.4 (2026-08-22)
 

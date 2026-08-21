@@ -4,9 +4,9 @@
 
 OpenClaw Skill：让 DeepSeek 模型能搜索、会搜索、并且"该搜就搜"，还能自动下载网页里的视频/音频/图片/文件，多模态模型还能"看页面+操作页面"。
 
-> 当前版本 **v1.12.5**（2026-08-22）· 作者：user · [更新记录](#更新记录)
+> 当前版本 **v1.12.6**（2026-08-22）· 作者：user · [更新记录](#更新记录)
 
-<p align="center"><img src=".github/mascot.png" alt="deepseek-web-search 吉祥物" width="220"></p>
+<p align="center"><img src="assets/mascot.png" alt="deepseek-web-search 吉祥物" width="220"></p>
 
 ## 功能总览
 
@@ -193,6 +193,13 @@ deepseek-web-search-plugin/
 
 ## 更新记录
 
+### v1.12.6（2026-08-22）
+
+仓库同步修复：
+
+- **修复：默认分支落后**。此前发版推到 `master`，而 GitHub 默认分支 `main` 还停在 v1.12.3——现在 `main` 已快进到最新，`master` 已删除，今后只维护单一分支
+- 吉祥物从 `.github/` 移到 `assets/`，修复 GitHub README 图片渲染（点开头隐藏目录的图片显示不稳定）
+
 ### v1.12.5（2026-08-22）
 
 视觉会话健壮性 + 仓库打磨：
@@ -200,7 +207,7 @@ deepseek-web-search-plugin/
 - 视觉会话：`--method vision` 启动后首屏状态现在带 `vision_capable` 和 `model` 字段（AI 进会话第一眼就能判定自己是否支持视觉）
 - 视觉会话：`eval` 指令新增 10s 死循环看门狗——用户/恶意 prompt 发的 `while(true){}` 等会卡死 JS 时，DevTools HTTP `/json/close` 端点强杀页面，会话自动重建（再也不会永久卡死）
 - Bug 修复：`own_search.py download` 和 `own_search.py seed` 补上 subprocess 超时（1800s / 300s），下游卡死不再拖死父进程
-- 仓库：新增项目吉祥物 `.github/mascot.png`，已嵌入两个 README 页面
+- 仓库：新增项目吉祥物（现位于 `assets/mascot.png`），已嵌入两个 README 页面
 
 ### v1.12.4（2026-08-22）
 
