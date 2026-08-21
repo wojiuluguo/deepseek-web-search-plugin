@@ -2384,10 +2384,12 @@ def _vision_route(url: str, output_dir: Path, headed: bool = False, safe: bool =
                         page.wait_for_timeout(300)
                     except Exception:
                         pass
+                # 首屏带上 vision_capable/model：AI 进会话第一眼就知道自己能不能看图
+                # （此前只在 return 路径的 dict 里有，stdout 状态流里看不到）
+                init_extra = {"vision_capable": base["vision_capable"], "model": base["model"]}
                 # 重定向告警：请求 URL 与最终 URL 不一致时告知 AI
-                init_extra = None
                 if startup_failed is None and url and page.url != url and page.url != "about:blank":
-                    init_extra = {"redirected_from": url}
+                    init_extra["redirected_from"] = url
                 _emit_state(page, note=(f"启动 URL 打不开：{startup_failed}"
                                         "（会话保留，可发 goto 指令换 URL）") if startup_failed else "",
                             extra=init_extra)
