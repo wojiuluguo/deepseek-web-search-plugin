@@ -4,7 +4,7 @@ English | **[中文](README.zh-CN.md)**
 
 An [OpenClaw](https://github.com/openclaw) skill that gives DeepSeek real web search **and** an auto-save browser that downloads videos/audio/images/files from any webpage it opens — plus a vision mode for multimodal models (see a page, operate a page).
 
-> Current version **v1.12.0** (2026-08-21)
+> Current version **v1.12.4** (2026-08-22) · Author: user · [Changelog](#changelog)
 
 ## Feature Overview
 
@@ -186,6 +186,17 @@ deepseek-web-search-plugin/
 - Bilibili m4s segmented streams and some blob/MSE videos can't be reassembled from browser cache alone; the script auto-falls back to yt-dlp.
 - No anti-bot approach is 100% reliable; browser emulation greatly reduces detection but strongly protected sites may still fail.
 - App-funnel pages (only app-store redirects, no real files) honestly report `app_only: true` — the site itself offers no web download; this is not a script defect.
+
+## Changelog
+
+### v1.12.4 (2026-08-22)
+
+Vision session overhaul + 12 critical bug fixes. Also ships the previously unreleased v1.12.2~v1.12.3 internal iterations (`focus` action with CSS selectors, `elements` element annotation, captcha detection reporting).
+- Data-loss guard: `verify_capture.py --clean` refuses to delete "broken" media when ffmpeg is missing (unverifiable ≠ broken).
+- Crash fix: `search_and_cache.py` subprocess timeouts no longer crash the whole script (returns JSON error instead); cache timeout raised to 300s.
+- Security fix: `own_search.py download --safe` now actually passes `--safe` to the underlying browser.
+- Search robustness: smart_search browser timeout 90s→240s; cross_search mega timeout scales with engine count and reports `timed_out_copies` instead of silently returning empty; URL dedup now keeps business-meaningful query params (`v/id/tid`…, e.g. different YouTube videos no longer collapse into one).
+- UX: vision session messages unified to Chinese; `--query --auto` now falls back to the chain route like `--url` mode; log newline typo fixed.
 
 ## License
 

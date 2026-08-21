@@ -10,6 +10,7 @@ downloads/cache/*
 # 临时/测试
 scripts/_tmp*
 *.log
+代码问题清单*.md
 
 # gh CLI 本地认证目录（含令牌，绝不提交）
 .gh/

@@ -1423,7 +1423,7 @@ def _save_page_text(page, url: str, output_dir: Path) -> Dict:
     body = (body or "").strip()
     if not body:
         return {"error": "page has no text content"}
-    stem = re.sub(r'[\\/:*?"<>|]+', "_", title).strip(" .")[:80] or "page"
+    stem = re.sub(r'[\\/:*?"<>|\s]+', "_", title).strip(" ._")[:80] or "page"
     output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / f"{int(time.time())}_{stem}.txt"
     content = (
@@ -1507,7 +1507,7 @@ def _file_direct_download(url: str, dest_dir: Path, safe: bool = False, referer:
             fname = re.sub(r'[\\/:*?"<>|]+', "_", fname).strip(" .") or "file"
             # 安全模式：可执行文件白名单拦截（下载前就挡）
             if safe and _safe_save_reason(fname, 0):
-                sys.stderr.write(f"[safe-block] 文件下载拒绝: {fname}\\n")
+                sys.stderr.write(f"[safe-block] 文件下载拒绝: {fname}\n")
                 return None
             dest_dir.mkdir(parents=True, exist_ok=True)
             path = dest_dir / fname
@@ -1950,6 +1950,10 @@ def _screen_info(page) -> Dict:
                 dpr: window.devicePixelRatio || 1,
                 mx: window.__mx || 0, my: window.__my || 0,
                 sy: window.scrollY || document.documentElement.scrollTop || 0,
+                ae: (document.activeElement && document.activeElement.tagName)
+                      ? document.activeElement.tagName.toLowerCase()
+                        + (document.activeElement.id ? '#' + document.activeElement.id : '')
+                      : '',
             })"""
         ) or {}
     except Exception:
@@ -1960,6 +1964,7 @@ def _screen_info(page) -> Dict:
         "device_pixel_ratio": info.get("dpr", 1),
         "mouse": {"x": info.get("mx", 0), "y": info.get("my", 0)},
         "scroll_y": info.get("sy", 0),
+        "active_element": info.get("ae", ""),
         "url": page.url,
     }
 
@@ -2005,13 +2010,15 @@ def _capture_full_page(page, output_dir: Path, prefix: str = "page",
             page.screenshot(path=str(p), full_page=True)
             paths.append(str(p))
         elif ph > VISION_MAX_IMAGE_EDGE:
-            # 超高页面：按 scroll 位置分段截（clip 顶部对齐滚动点），每段原始分辨率
+            # 超高页面：按 scroll 位置分段截（clip 顶部对齐滚动点），每段原始分辨率。
+            # 必须 full_page=True：不带它 clip 会被钳到视口内（首段只剩一屏），
+            # 且起点超出视口直接抛 "Clipped area outside"（后续段全部丢失）
             seg = 0
             y = 0
             while y < ph and seg < 20:
                 h = min(segment_max_px, ph - y)
                 p = output_dir / f"{prefix}_{stamp}_seg{seg}.png"
-                page.screenshot(path=str(p), clip={"x": 0, "y": y, "width": vw, "height": h})
+                page.screenshot(path=str(p), full_page=True, clip={"x": 0, "y": y, "width": vw, "height": h})
                 paths.append(str(p))
                 y += h
                 seg += 1
@@ -2070,9 +2077,10 @@ def _screenshot_standalone(url: str, output_dir: Path, headed: bool = False, saf
 
 
 # 视觉会话支持的鼠标/键盘动作（官方 Vision 模型 + Playwright 鼠标 API 对齐）
-VISION_ACTIONS = ("click", "dblclick", "right_click", "move", "scroll",
+VISION_ACTIONS = ("click", "dblclick", "right_click", "move", "drag", "scroll",
                   "type", "press", "focus", "elements", "goto", "back",
-                  "forward", "reload", "wait", "screenshot", "eval", "quit")
+                  "forward", "reload", "wait", "screenshot", "eval",
+                  "viewport", "shot_policy", "quit")
 
 # 页面元素标注 JS：收集所有可见可点元素 + 视口坐标（视觉模型点前先 elements 拿准坐标，
 # 不用瞎猜截图里的像素位置）
@@ -2139,9 +2147,14 @@ CAPTCHA_JS = """
 """
 
 
-def _vision_exec_action(page, cmd: Dict, output_dir: Path, prefix: str) -> Dict:
-    """执行一条视觉会话指令，返回 {ok, note}。指令格式见 _vision_route 文档。"""
+def _vision_exec_action(page, cmd: Dict, output_dir: Path, prefix: str,
+                        wait_cap_ms: int = 0) -> Dict:
+    """执行一条视觉会话指令，返回 {ok, note}。指令格式见 _vision_route 文档。
+    wait_cap_ms>0 时 wait 指令的毫秒数被钳到该值（会话剩余预算），防长 wait 拖爆总超时。"""
     act = (cmd.get("action") or "").strip().lower()
+    # 坐标类动作必须显式给 x/y：缺坐标默认 (0,0) 会盲点到 BODY 上还"假成功"
+    if act in ("click", "dblclick", "right_click", "move") and ("x" not in cmd or "y" not in cmd):
+        return {"ok": False, "note": f"{act} 缺少 x/y 坐标（视口像素；先发 elements 指令拿准坐标）"}
     x, y = cmd.get("x", 0), cmd.get("y", 0)
     try:
         if act == "click":
@@ -2152,52 +2165,95 @@ def _vision_exec_action(page, cmd: Dict, output_dir: Path, prefix: str) -> Dict:
             page.mouse.click(x, y, button="right")
         elif act == "move":
             page.mouse.move(x, y)
+        elif act == "drag":
+            # 拖动三件套：move→down→move(steps 分步插值)→up。
+            # 覆盖滑块/画布类（mousedown-mousemove-mouseup 监听）；
+            # HTML5 draggable 元素（dragstart 事件）此模拟不保证触发
+            if any(k not in cmd for k in ("x", "y", "to_x", "to_y")):
+                return {"ok": False, "note": "drag needs 'x','y'（起点）和 'to_x','to_y'（终点，视口像素）"}
+            tx, ty = int(cmd["to_x"]), int(cmd["to_y"])
+            page.mouse.move(x, y)
+            page.mouse.down()
+            page.mouse.move(tx, ty, steps=12)
+            page.mouse.up()
+            return {"ok": True, "note": f"已拖动 ({x},{y}) → ({tx},{ty})"}
         elif act == "scroll":
             page.mouse.wheel(x, cmd.get("y", 600))  # x=横向增量, y=纵向增量（正=向下）
         elif act == "type":
-            page.keyboard.type(str(cmd.get("text", "")), delay=30)
+            text = str(cmd.get("text", ""))
+            if not text:
+                return {"ok": False, "note": "type 缺少 text（要输入的内容）"}
+            page.keyboard.type(text, delay=30)
+            return {"ok": True, "note": f"已输入 {len(text)} 个字符"}
         elif act == "press":
             page.keyboard.press(str(cmd.get("key", "Enter")))
         elif act == "focus":
             # 按 CSS 选择器聚焦元素（比裸坐标点更可靠：盲点坐标会打到 BODY 上输入失效）
             sel = str(cmd.get("selector", ""))
             if not sel:
-                return {"ok": False, "note": "focus needs 'selector' (CSS, e.g. input[name=q])"}
+                return {"ok": False, "note": "focus 缺少 selector（CSS 选择器，如 input[name=q]）"}
             el = page.locator(sel).first
             el.focus(timeout=3000)
             tag = el.evaluate("e => e.tagName")
-            return {"ok": True, "note": f"focused {tag} via {sel}"}
+            return {"ok": True, "note": f"已聚焦 {tag}（选择器 {sel}）"}
         elif act == "goto":
-            page.goto(str(cmd.get("url", "")), wait_until="domcontentloaded", timeout=30000)
-            _wait_for_render(page)
+            target = str(cmd.get("url", ""))
+            if not target:
+                return {"ok": False, "note": "goto 缺少 url（要打开的网址）"}
+            page.goto(target, wait_until="domcontentloaded", timeout=30000)
+            _wait_for_render(page, max_wait_sec=4.0)  # 同启动：会话内可交互，不用等满 10s
+            # 懒加载滚动后回顶：视觉会话依赖视口坐标，停在页底会让 elements 坐标全错
+            try:
+                page.evaluate("window.scrollTo(0, 0)")
+                page.wait_for_timeout(300)
+            except Exception:
+                pass
         elif act == "back":
             page.go_back(timeout=15000)
         elif act == "forward":
             page.go_forward(timeout=15000)
         elif act == "reload":
             page.reload(wait_until="domcontentloaded", timeout=30000)
+        elif act == "viewport":
+            # 改视口尺寸：DeepSeek 视觉原生 800×800（超范围官方会压糊）；
+            # 改完坐标基准变了，AI 需重新 elements 拿新坐标
+            try:
+                w, h = int(cmd.get("width", 0)), int(cmd.get("height", 0))
+            except (TypeError, ValueError):
+                return {"ok": False, "note": "viewport 参数需为整数"}
+            if not (200 <= w <= 3840 and 200 <= h <= 3840):
+                return {"ok": False, "note": "viewport 缺少 width/height（各 200-3840 px）"}
+            page.set_viewport_size({"width": w, "height": h})
+            page.wait_for_timeout(300)  # 等重排稳定
+            return {"ok": True, "note": f"viewport 已改为 {w}×{h}（坐标基准变了，建议重新 elements）"}
         elif act == "wait":
-            page.wait_for_timeout(int(cmd.get("ms", 1000)))
+            ms = int(cmd.get("ms", 1000))
+            if wait_cap_ms > 0:
+                ms = max(0, min(ms, wait_cap_ms))  # 钳到剩余预算：长 wait 拖爆总超时
+            page.wait_for_timeout(ms)
         elif act == "elements":
             # 元素标注：返回视口内所有可见可点元素（tag/text/中心坐标/尺寸）。
             # 视觉模型点按钮前先 elements 拿准坐标，不用从截图里猜像素
             els = page.evaluate(ELEMENTS_JS) or []
             return {"ok": True, "note": "", "elements": els}
         elif act == "eval":
-            return {"ok": True, "note": str(page.evaluate(str(cmd.get("js", "1+1"))))[:400]}
+            val = page.evaluate(str(cmd.get("js", "1+1")))
+            # data 字段给结构化结果（note 是纯文本给 AI 看的）
+            return {"ok": True, "note": f"eval: {val}"[:400], "data": val}
         elif act in ("screenshot", "quit"):
             pass  # 由调用方处理
         else:
-            return {"ok": False, "note": f"unknown action: {act}（支持: {', '.join(VISION_ACTIONS)}）"}
+            return {"ok": False, "note": f"未知动作: {act}（支持: {', '.join(VISION_ACTIONS)}）"}
         return {"ok": True, "note": ""}
     except Exception as exc:
-        return {"ok": False, "note": f"{act} failed: {exc}"}
+        return {"ok": False, "note": f"{act} 失败: {exc}"}
 
 
 def _vision_route(url: str, output_dir: Path, headed: bool = False, safe: bool = False,
                   max_screens: int = VISION_DEFAULT_MAX_SCREENS,
                   detail: str = "original", model: str = "",
-                  session_timeout_sec: int = 900) -> Dict:
+                  session_timeout_sec: int = 900,
+                  viewport_w: int = 800, viewport_h: int = 800) -> Dict:
     """视觉会话模式（--method vision）：给多模态模型的"眼睛+手"。
 
     协议（stdin/stdout 各一行一个 JSON，AI Agent 驱动）：
@@ -2206,15 +2262,19 @@ def _vision_route(url: str, output_dir: Path, headed: bool = False, safe: bool =
          {"action":"click","x":100,"y":200}   左键点击（坐标=视口像素）
          {"action":"right_click","x":..,"y":..} 右键 / {"action":"dblclick",...} 双击
          {"action":"move","x":..,"y":..}        移动鼠标（视觉模型先看再点）
+         {"action":"drag","x":..,"y":..,"to_x":..,"to_y":..}  拖动（滑块/画布类；HTML5 draggable 不保证触发）
          {"action":"scroll","x":0,"y":600}      滚动（y 正=向下）
          {"action":"type","text":"关键词"}       键盘输入
          {"action":"press","key":"Enter"}       按键
          {"action":"focus","selector":"input[name=q]"}  按 CSS 选择器聚焦（输入前先 focus 比裸坐标点更可靠）
          {"action":"elements"}                元素标注：返回视口内全部可点元素（tag/text/中心坐标/尺寸），点按钮前先拿这个
-         {"action":"goto","url":"https://.."}   跳转 / back / forward / reload
+         {"action":"goto","url":"https://.."}   跳转 / back / forward / reload（启动 URL 失败会话也保活，可 goto 重试）
          {"action":"wait","ms":800}             等待（等动画/懒加载）
          {"action":"screenshot"}                主动重新截图
-         {"action":"eval","js":"1+1"}           执行 JS（只读用途，返回值放 note）
+         {"action":"eval","js":"1+1"}           执行 JS（只读用途，结构化结果放 state 的 eval_result 字段）
+         {"action":"viewport","width":1280,"height":800}  改视口（默认 800×800=DeepSeek 原生；改完重新 elements）
+         {"action":"shot_policy","every":3}     截图节奏：每 3 个成功动作截 1 张（默认 1=动一次拍一次）
+         {"action":"shot_policy","interval_ms":1000}      空闲时每秒自动截 1 张（默认 0=关；预算耗尽自动停）
          {"action":"quit"}                      结束会话
       3. 每条指令执行后 stdout 输出新状态（新截图 + 屏幕信息），直到 quit 或 stdin 关闭
 
@@ -2234,15 +2294,19 @@ def _vision_route(url: str, output_dir: Path, headed: bool = False, safe: bool =
             "vision_capable": _is_vision_model(model) if model else True}
     shots_used = 0
     all_shots: List[str] = []
+    last_auto_shot = time.time()  # 自动截图计时基准（任何一次截图都重置）
 
-    def _emit_state(page, done: bool = False, note: str = "", extra: Optional[Dict] = None):
-        nonlocal shots_used
+    def _emit_state(page, done: bool = False, note: str = "", extra: Optional[Dict] = None,
+                    shoot: bool = True):
+        nonlocal shots_used, last_auto_shot
         shot = None
-        if shots_used < max_screens:
+        # shoot=False：坏JSON/失败指令页面没变化，不新截图（省配额），回退上一张
+        if shoot and shots_used < max_screens:
             shot = _shot_viewport(page, output_dir)
             if shot:
                 shots_used += 1
                 all_shots.append(shot)
+                last_auto_shot = time.time()  # 拍过就重置自动截图计时，避免动作拍完紧跟自动拍
         # 验证码自动检测（每步都查，检测到立即上报——不绕过，人工接管）
         captcha = []
         try:
@@ -2281,7 +2345,9 @@ def _vision_route(url: str, output_dir: Path, headed: bool = False, safe: bool =
             try:
                 context = browser.new_context(
                     user_agent=random.choice(USER_AGENTS),
-                    viewport={"width": 1920, "height": 1080},
+                    # 视口默认 800×800 = DeepSeek 视觉原生分辨率（超范围会被官方压糊）；
+                    # AI 可用 viewport 指令或 --viewport 参数改（不局限于 DeepSeek）
+                    viewport={"width": viewport_w, "height": viewport_h},
                     locale="zh-CN", timezone_id="Asia/Shanghai",
                     ignore_https_errors=True,
                     **({"service_workers": "block"} if safe else {}),
@@ -2290,9 +2356,41 @@ def _vision_route(url: str, output_dir: Path, headed: bool = False, safe: bool =
                 page = context.new_page()
                 if safe:
                     _setup_safe_mode(context, page)
-                page.goto(url, wait_until="domcontentloaded", timeout=30000)
-                _wait_for_render(page)
-                _emit_state(page)
+                # 目录已有旧截图时提醒（自动清理有误删风险，只提示）
+                try:
+                    old_shots = len(list(output_dir.glob("screen_*.png")))
+                    if old_shots:
+                        print(f"[提示] 输出目录已有 {old_shots} 张旧截图，本次会话截图会继续追加",
+                              file=sys.stderr)
+                except Exception:
+                    pass
+                startup_failed = None
+                try:
+                    page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                except Exception as exc:
+                    # 启动 URL 失败不杀会话：切空白页保活，AI 可发 goto 指令换 URL 重试
+                    startup_failed = str(exc)
+                    try:
+                        page.goto("about:blank")
+                    except Exception:
+                        pass
+                if startup_failed is None:
+                    # 视觉会话等 4s 就够：会话可交互，AI 可自行 wait/reload；
+                    # 共享版默认 10s 会让文字少的页面（图库等）白等
+                    _wait_for_render(page, max_wait_sec=4.0)
+                    # 懒加载滚动后回顶：视觉会话依赖视口坐标，停在页底会让 elements 坐标全错
+                    try:
+                        page.evaluate("window.scrollTo(0, 0)")
+                        page.wait_for_timeout(300)
+                    except Exception:
+                        pass
+                # 重定向告警：请求 URL 与最终 URL 不一致时告知 AI
+                init_extra = None
+                if startup_failed is None and url and page.url != url and page.url != "about:blank":
+                    init_extra = {"redirected_from": url}
+                _emit_state(page, note=(f"启动 URL 打不开：{startup_failed}"
+                                        "（会话保留，可发 goto 指令换 URL）") if startup_failed else "",
+                            extra=init_extra)
                 # 指令循环：stdin 逐行 JSON → 执行 → 输出新状态（EOF/quit 退出）。
                 # 看门狗兜底（跨平台方案：读线程+队列，Windows 的 stdin 不是 socket
                 # 用不了 selectors）：AI 卡死不发指令（120s 断线）或会话超总时长
@@ -2315,17 +2413,39 @@ def _vision_route(url: str, output_dir: Path, headed: bool = False, safe: bool =
                 reader.start()
                 session_start = time.time()
                 idle_limit = 120  # 连续 120s 无下一条指令 = AI 断线
+                # 截图节奏（shot_policy 指令可调）：默认动一次拍一张；空闲自动拍默认关
+                shot_every = 1
+                auto_interval_ms = 0
+                actions_since_shot = 0
+                last_cmd_time = session_start
                 while True:
-                    if time.time() - session_start > session_timeout_sec:
-                        _emit_state(page, done=True, note="session timeout (overall cap)")
+                    now = time.time()
+                    if now - session_start > session_timeout_sec:
+                        _emit_state(page, done=True, note="会话总时长到达上限，自动收尾")
                         break
+                    # 等待切片：取「空闲看门狗剩余」「下次自动截图」两者最早的（每片上限 2s）
+                    wait = (last_cmd_time + idle_limit) - now
+                    if auto_interval_ms:
+                        wait = min(wait, auto_interval_ms / 1000.0)
+                    wait = max(0.05, min(wait, 2.0))
                     try:
-                        line = cmd_q.get(timeout=idle_limit)
+                        line = cmd_q.get(timeout=wait)
+                        last_cmd_time = time.time()
                     except _queue.Empty:
-                        _emit_state(page, done=True, note="idle watchdog: no command in 120s, AI side disconnected?")
-                        break
+                        now2 = time.time()
+                        if now2 - last_cmd_time >= idle_limit:
+                            _emit_state(page, done=True, note="空闲看门狗：120s 未收到指令，判定 AI 侧断线，自动收尾")
+                            break
+                        # 空闲自动截图：到点且预算没耗尽才拍；耗尽则自动关并告知（防刷屏）
+                        if auto_interval_ms and (now2 - last_auto_shot) * 1000 >= auto_interval_ms:
+                            if shots_used < max_screens:
+                                _emit_state(page, note="空闲自动截图")
+                            else:
+                                _emit_state(page, note="自动截图已停：截图预算耗尽", shoot=False)
+                                auto_interval_ms = 0
+                        continue
                     if line is None:  # EOF：stdin 关闭
-                        _emit_state(page, done=True, note="stdin closed")
+                        _emit_state(page, done=True, note="stdin 已关闭（EOF），会话结束")
                         break
                     line = line.strip()
                     if not line:
@@ -2333,20 +2453,54 @@ def _vision_route(url: str, output_dir: Path, headed: bool = False, safe: bool =
                     try:
                         cmd = json.loads(line)
                     except Exception:
-                        _emit_state(page, note="invalid json command")
+                        _emit_state(page, note="指令不是合法 JSON，已忽略", shoot=False)
                         continue
                     act = (cmd.get("action") or "").strip().lower()
                     if act == "quit":
-                        _emit_state(page, done=True, note="session closed")
+                        _emit_state(page, done=True, note="会话已关闭")
                         break
-                    r = _vision_exec_action(page, cmd, output_dir, "vision")
+                    if act == "shot_policy":
+                        # 截图节奏调整：every=每 N 个成功动作截一张（默认1）；
+                        # interval_ms=空闲时自动截图间隔（默认0=关）。两者可只给其一
+                        try:
+                            shot_every = max(1, int(cmd.get("every", shot_every)))
+                            auto_interval_ms = max(0, int(cmd.get("interval_ms", auto_interval_ms)))
+                        except (TypeError, ValueError):
+                            _emit_state(page, note="shot_policy 参数需为整数（every≥1，interval_ms≥0）", shoot=False)
+                            continue
+                        if auto_interval_ms:
+                            last_auto_shot = time.time()  # 开启后从现在起计时，不追补历史
+                        _emit_state(page, note=(f"截图节奏: 每 {shot_every} 个动作一张"
+                                                + (f"，空闲每 {auto_interval_ms}ms 自动一张"
+                                                   if auto_interval_ms else "，自动截图关")),
+                                    shoot=False)
+                        continue
+                    # wait 钳到剩余预算：超时检查在指令间隙，长 wait 会拖爆总超时
+                    remaining_ms = int((session_timeout_sec - (time.time() - session_start)) * 1000)
+                    r = _vision_exec_action(page, cmd, output_dir, "vision",
+                                            wait_cap_ms=max(0, remaining_ms))
                     if act == "screenshot":
                         r = {"ok": True, "note": ""}
                     if act in ("goto", "reload", "back", "forward"):
                         page.wait_for_timeout(800)
                     # elements 指令的元素清单带进状态（视觉模型直接读坐标点按钮）
-                    extra = {"elements": r["elements"]} if r.get("elements") else None
-                    _emit_state(page, note=r.get("note", ""), extra=extra)
+                    extra = {}
+                    if r.get("elements"):
+                        extra["elements"] = r["elements"]
+                    if "data" in r:
+                        extra["eval_result"] = r["data"]  # eval 结构化结果
+                    extra = extra or None
+                    # 截图节奏：screenshot 指令强制拍；成功动作每 every 张拍一次；失败不拍
+                    if act == "screenshot":
+                        shoot_now, actions_since_shot = True, 0
+                    elif r.get("ok", True):
+                        actions_since_shot += 1
+                        shoot_now = actions_since_shot >= shot_every
+                        if shoot_now:
+                            actions_since_shot = 0
+                    else:
+                        shoot_now = False
+                    _emit_state(page, note=r.get("note", ""), extra=extra, shoot=shoot_now)
             finally:
                 browser.close()
         return {**base, "count": len(all_shots), "screenshots": all_shots,
@@ -2672,6 +2826,7 @@ def auto_save_url(
     vision_detail: str = "original",
     model_name: str = "",
     vision_timeout: int = 900,
+    vision_viewport: tuple = (800, 800),
 ) -> Dict:
     """
     核心逻辑：
@@ -2737,7 +2892,8 @@ def auto_save_url(
     if method == "vision":
         return _vision_route(url, output_dir, headed=headed, safe=safe,
                              max_screens=vision_max_screens, detail=vision_detail,
-                             model=model_name, session_timeout_sec=vision_timeout)
+                             model=model_name, session_timeout_sec=vision_timeout,
+                             viewport_w=vision_viewport[0], viewport_h=vision_viewport[1])
 
     # direct：只尝试直接下载直链媒体文件。
     if method == "direct":
@@ -3281,6 +3437,12 @@ def main(argv=None):
         help="视觉会话兜底：会话总时长上限秒数（默认 900=15分钟）。超时/AI 断线 120s 无指令都自动收尾退出，绝不挂死进程",
     )
     parser.add_argument(
+        "--viewport",
+        default="800x800",
+        metavar="WxH",
+        help="视觉会话视口尺寸（默认 800x800=DeepSeek 视觉原生分辨率，超范围官方压糊）。AI 也可在会话中发 {\"action\":\"viewport\",\"width\":W,\"height\":H} 动态改",
+    )
+    parser.add_argument(
         "--zip",
         action="store_true",
         help="files 路线专用：页面多个文件下载完后打包成单个 zip（默认保留散文件不打包）",
@@ -3327,6 +3489,14 @@ def main(argv=None):
             line_name = {"image": "图片", "audio": "音频", "file": "文件", "video": "视频", "text": "文本"}[mt]
             print(f"[选路] 识别为{line_name}目标，走 {method} 专用线（失败自动退回 chain）", file=sys.stderr)
         try:
+            # --viewport "WxH" 解析（vision 会话视口；坏格式回退默认 800x800）
+            try:
+                _vw, _vh = str(args.viewport).lower().split("x", 1)
+                vision_vp = (max(200, min(3840, int(_vw))), max(200, min(3840, int(_vh))))
+            except (ValueError, AttributeError):
+                vision_vp = (800, 800)
+                print(f"[提示] --viewport 格式应为 WxH（如 1280x800），已回退默认 800x800",
+                      file=sys.stderr)
             data = auto_save_url(
                 args.url,
                 output_dir,
@@ -3346,6 +3516,7 @@ def main(argv=None):
                 vision_detail=args.shot_detail,
                 model_name=args.model or "",
                 vision_timeout=args.vision_timeout,
+                vision_viewport=vision_vp,
             )
             # 自动选到 harvest/files 但颗粒无收：退回通用链再试一次（chain 自带优雅降级）。
             if auto_routed and data.get("count", 0) == 0 and not args.click_download:
@@ -3434,6 +3605,36 @@ def main(argv=None):
             data["query"] = args.query
             data["picked_url"] = url
             data["media_intent"] = media_type
+            # 与 --url 模式对齐：自动选到专用线（harvest/files/text）颗粒无收时
+            # 退回 chain 通用链重试（chain 自带优雅降级），失败不再直接报"没有收获"
+            if (method != "chain" and args.method is None
+                    and data.get("count", 0) == 0 and not args.click_download):
+                print(f"[选路] {method} 无收获，退回 chain 通用链重试", file=sys.stderr)
+                try:
+                    retry = auto_save_url(
+                        url,
+                        output_dir,
+                        args.wait,
+                        method="chain",
+                        headed=args.headed,
+                        max_wait=args.max_wait,
+                        auto_wait=not args.no_auto_wait,
+                        save_junk=args.save_junk,
+                        keep_segments=args.keep_segments,
+                        media_types=args.media_type,
+                        safe=args.safe,
+                        zip_bundle=args.zip,
+                        max_chapters=args.max_chapters,
+                    )
+                    if retry.get("count", 0) > 0:
+                        retry["mode"] = "query"
+                        retry["query"] = args.query
+                        retry["picked_url"] = url
+                        retry["media_intent"] = media_type
+                        retry["method_fallback"] = f"{method}→chain"
+                        data = retry
+                except Exception:
+                    pass
     else:
         print("使用 --query 时必须加 --auto 才会自动打开并下载。", file=sys.stderr)
         return 2

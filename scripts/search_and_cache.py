@@ -41,14 +41,19 @@ def run_search(query: str, max_results: int, browser: bool, safe: bool = False) 
         cmd.append("--browser")
     if safe:
         cmd.append("--safe")
-    proc = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="ignore",
-        timeout=120,
-    )
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="ignore",
+            timeout=300,  # smart_search 多轮分类最坏 180s+，120s 会把正常轮次杀掉
+        )
+    except subprocess.TimeoutExpired:
+        return {"results": [], "summary": f"搜索超时(>{300}s)：{query[:50]}"}
+    except Exception as exc:
+        return {"results": [], "summary": f"搜索进程异常: {exc}"}
     try:
         return json.loads(proc.stdout or "{}")
     except Exception:
@@ -72,14 +77,19 @@ def cache_url(url: str, cache_dir: Path, method: str, media_type: str = "", safe
         cmd += ["--media-type", media_type]
     if safe:
         cmd.append("--safe")
-    proc = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="ignore",
-        timeout=180,
-    )
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="ignore",
+            timeout=300,  # chain 内部 --max-wait 默认就 180s+滚动收割合并，180s 必超
+        )
+    except subprocess.TimeoutExpired:
+        return {"error": f"缓存超时(>300s)：{url[:80]}", "_url": url}
+    except Exception as exc:
+        return {"error": f"缓存进程异常: {exc}", "_url": url}
     try:
         data = json.loads(proc.stdout or "{}")
     except Exception:

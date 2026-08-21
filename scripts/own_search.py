@@ -313,6 +313,8 @@ def cmd_download(args):
         cmd += ["--query", args.query, "--auto"]
     if args.output_dir:
         cmd += ["--output-dir", args.output_dir]
+    if getattr(args, "safe", False):
+        cmd.append("--safe")
     proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore")
     if proc.stdout:
         print(proc.stdout)

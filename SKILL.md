@@ -1,8 +1,8 @@
 ---
 name: deepseek-web-search
 description: DeepSeek 联网搜索技能。遇到实时信息、事实核查、新闻、价格、代码报错、未知名词或用户说“搜一下”时，必须使用本技能搜索并附来源。
-version: 1.12.1
-updated: 2026-08-21
+version: 1.12.4
+updated: 2026-08-22
 author: user
 license: MIT
 tags: [web, search, deepseek, 联网, 搜索]
@@ -53,7 +53,7 @@ tags: [web, search, deepseek, 联网, 搜索]
 | `all methods failed`（媒体抓取） | 换 `--method chain` 再试一次；还不行如实报告 |
 | 下载输出带 `crash: page open failed`/`browser error`（页面打不开/超时） | 已自动降级：chain 会继续试下一种方式；换 `--method ytdlp` 或稍后重试 |
 | `yt-dlp not installed` | 改用 `--method browser` 或跑安装脚本 |
-| 产物 `duration_inflated`/`broken`（合并虚标/坏文件） | `verify_capture.py --clean` 清掉，再用 `--assemble` 正规重组装分段 |
+| 产物 `duration_inflated`/`broken`（合并虚标/坏文件） | `verify_capture.py --clean` 清掉，再用 `--assemble` 正规重组装分段。注意：机器上没有 ffmpeg 时 `--clean` 会自动拒删 broken（无法验证≠损坏，输出 skipped_reason），此时先装 ffmpeg 重新 `--dir` 扫描再清 |
 | 找不到 ffmpeg（时长无法验证 / yt-dlp 合并 B站分离流中止） | 自动三保险探测：`FFMPEG_PATH`/`FFMPEG_LOCATION` 环境变量 → PATH → 常见位置（winget/scoop/choco/`C:\ffmpeg`/`~/ffmpeg`）；探测结果自动喂给 yt-dlp，无需手动设变量 |
 | 搜索结果 `low_relevance` | 换关键词重搜（加具体词/换同义词），不要直接放弃 |
 | DNS/网络超时 | 中文词换国内引擎 `--engines sogou,so360,baidu` |
@@ -82,6 +82,7 @@ tags: [web, search, deepseek, 联网, 搜索]
 {"action":"click","x":100,"y":200}     // 左键点击（视口坐标）
 {"action":"right_click","x":100,"y":200}
 {"action":"move","x":300,"y":150}      // 先移鼠标看清位置再点
+{"action":"drag","x":100,"y":300,"to_x":350,"to_y":300}  // 拖动（滑块/画布类；HTML5 draggable 不保证触发）
 {"action":"scroll","x":0,"y":600}      // 滚动（y 正=向下）
 {"action":"type","text":"搜索词"}
 {"action":"focus","selector":"input[name=q]"}
@@ -89,16 +90,21 @@ tags: [web, search, deepseek, 联网, 搜索]
 {"action":"goto","url":"https://..."}
 {"action":"wait","ms":800}
 {"action":"eval","js":"document.title"}
+{"action":"viewport","width":1280,"height":800}  // 改视口（默认 800×800=DeepSeek 视觉原生分辨率；改完坐标基准变了要重新 elements）
+{"action":"shot_policy","every":3}               // 截图节奏：每 3 个成功动作截 1 张（默认 1=动一次拍一次）
+{"action":"shot_policy","interval_ms":1000}      // 空闲时每秒自动截 1 张（默认 0=关；预算耗尽自动停）
 {"action":"quit"}
 ```
 
-**每步输出状态**：`screenshot`（最新截图路径）+ `screen`（视口尺寸/整页尺寸/DPR/鼠标位置/滚动位置——你据此判断坐标）+ `screenshots_used/max`（成本计数）+ `api_hint`（官方 API 参数照抄即可拼请求：base64 内联、detail 等级、384 token 封顶）。
+**每步输出状态**：`screenshot`（最新截图路径）+ `screen`（视口尺寸/整页尺寸/DPR/鼠标位置/滚动位置/当前焦点元素 active_element——你据此判断坐标和 Tab 导航结果）+ `screenshots_used/max`（成本计数）+ `api_hint`（官方 API 参数照抄即可拼请求：base64 内联、detail 等级、384 token 封顶）。失败指令（缺 x/y、缺 text、坏 JSON）只回错误 note 不消耗截图配额——页面没变不用重拍。`eval` 的结构化结果放 `eval_result` 字段（note 里是文本版）。启动 URL 打不开时**会话保活**（note 提示 startup url failed），直接发 `goto` 指令换 URL 即可，不用重开会话。页面发生跳转时初始状态带 `redirected_from` 告警。
 
 **elements 元素标注**（点按钮前先拿这个，不用从截图猜像素）：返回视口内全部可见可点元素 `[{tag, text, x, y, w, h, type, name}]`——x/y 是中心坐标直接喂给 click。
 
 **验证码处理（重要，合法合规）**：每步自动检测验证码（geetest/recaptcha/hCaptcha/滑块/点选），检测到状态里出 `captcha_detected: [类型]` + `captcha_help`。**只检测不绕过**——自动破解验证码违法且违反站点条款。正确姿势：告诉用户"页面有验证码"，用 `--headed` 重开会话让用户手动完成（人过的验证码天经地义），AI 用 `{"action":"wait","ms":5000}` 等用户解完再继续。
 
-**成本防护**：`--max-screenshots`（默认 30）封顶截图数，超限自动停截图只报状态；`--shot-detail low` 用 512×512 省钱模式。别每动一下就截一张——先看屏幕信息判断，必要时才截。
+**成本防护**：`--max-screenshots`（默认 30）封顶截图数，超限自动停截图只报状态；`--shot-detail low` 用 512×512 省钱模式。默认节奏=每个成功动作截 1 张（失败指令不截不耗预算）；嫌费发 `{"action":"shot_policy","every":3}` 改成每 3 个动作 1 张。空闲自动截图（`interval_ms`）默认关，开启后预算耗尽会自动停并告知。
+
+**视口默认 800×800**（DeepSeek 视觉原生分辨率，超范围官方压糊）：启动可用 `--viewport 1280x800` 指定，会话中可发 `{"action":"viewport","width":W,"height":H}` 动态改（改完坐标基准变了，重新 elements）。注意 800px 宽度下部分网站会切移动版布局，需要桌面版就改宽视口。
 
 **兜底（你挂了它也不会挂）**：会话总时长上限 `--vision-timeout`（默认 900s）；120s 收不到你的下一条指令 = 判定你断线，自动收尾退出；任何指令异常只回 failed 不崩会话；进程绝不因调用方故障挂死。
 

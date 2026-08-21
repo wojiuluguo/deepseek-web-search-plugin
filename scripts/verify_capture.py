@@ -185,11 +185,17 @@ def scan_dir(target: Path) -> Dict:
 
 
 def clean_dir(report: Dict, also_broken: bool = True) -> Dict:
-    """删除垃圾；默认连 broken/inflated 一起删（都可判定为不可用产物）。"""
+    """删除垃圾；默认连 broken/inflated 一起删（都可判定为不可用产物）。
+    安全阀：无 ffmpeg 时所有媒体都会被判成 broken（无法验证≠损坏），
+    此时只删 junk，拒删 broken/inflated，防止把用户抓好的正片全部清掉。"""
     removed = []
     verdicts = {"junk"}
+    blocked_no_ffmpeg = False
     if also_broken:
-        verdicts |= {"broken", "duration_inflated"}
+        if report.get("ffmpeg_found"):
+            verdicts |= {"broken", "duration_inflated"}
+        else:
+            blocked_no_ffmpeg = True
     for i in report["items"]:
         if i.get("verdict") in verdicts:
             try:
@@ -197,7 +203,13 @@ def clean_dir(report: Dict, also_broken: bool = True) -> Dict:
                 removed.append(i["file"])
             except OSError:
                 pass
-    return {"removed": removed, "removed_count": len(removed)}
+    out = {"removed": removed, "removed_count": len(removed)}
+    if blocked_no_ffmpeg:
+        n_broken = sum(1 for i in report["items"] if i.get("verdict") in ("broken", "duration_inflated"))
+        out["skipped_broken"] = n_broken
+        out["skipped_reason"] = ("未安装 ffmpeg：broken/inflated 判定不可信（无法验证≠损坏），"
+                                 "已跳过不删。装好 ffmpeg 后重新 scan 再 --clean")
+    return out
 
 
 def assemble_segments(seg_dir: Path) -> Dict:
@@ -229,6 +241,7 @@ def assemble_segments(seg_dir: Path) -> Dict:
             capture_output=True, text=True, encoding="utf-8", errors="ignore", timeout=300,
         )
         if proc.returncode != 0 or not out_path.exists():
+            out_path.unlink(missing_ok=True)  # -y 模式可能已写了半成品，失败必须清掉
             return {"ok": False, "error": "concat remux 失败(分段容器不兼容)", "stderr_tail": proc.stderr[-300:]}
         real = _decoded_duration(str(out_path))
         if real is None or real < MIN_PLAYABLE_SEC:

@@ -85,6 +85,10 @@ def run_attempt(query: str, category: str, browser: bool, max_results: int, safe
     # 安全模式只对浏览器版有意义（search.py 是纯 requests，不碰可疑站点内容）
     if browser and safe:
         cmd.append("--safe")
+    # 超时按引擎规模给：浏览器版每引擎最坏 ~36s（goto 25s+选择器 10s），
+    # finance=3 引擎/general=4 引擎/all=9 引擎，固定 90s 会把引擎慢的整轮误杀；
+    # 轻量版纯 requests 快，维持 90s
+    timeout_sec = 240 if browser else 90
     try:
         proc = subprocess.run(
             cmd,
@@ -92,7 +96,7 @@ def run_attempt(query: str, category: str, browser: bool, max_results: int, safe
             text=True,
             encoding="utf-8",
             errors="ignore",
-            timeout=90,
+            timeout=timeout_sec,
         )
         data = json.loads(proc.stdout or "{}")
         data["_returncode"] = proc.returncode

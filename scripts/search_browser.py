@@ -88,16 +88,28 @@ def _result(title: str, url: str, snippet: str, source: str) -> Dict[str, str]:
     }
 
 
+# 有业务含义的 query 参数（保留参与去重 key；其余跟踪参数如 utm_*/spm 等仍丢弃）
+_URL_KEEP_PARAMS = ("v", "id", "p", "tid", "pid", "aid", "vid", "q", "w", "keyword",
+                    "doc", "item", "thread", "post", "video", "album", "song", "play")
+
+
 def _normalize_url(url: str) -> str:
-    """URL 规范化：去 www.、去 query/fragment 参数、去尾斜杠。
-    同一页面从 5 个引擎来（带各自跟踪参数）也只留一份。"""
+    """URL 规范化：去 www.、去跟踪类 query/fragment、去尾斜杠。
+    同一页面从 5 个引擎来（带各自跟踪参数）只留一份；
+    但保留有业务含义的参数（v/id/tid 等）——YouTube watch?v=aaa 和 watch?v=bbb
+    是不同视频，丢了参数会被误判成同一条。"""
     try:
         parsed = urllib.parse.urlparse(url)
         host = parsed.netloc.lower()
         if host.startswith("www."):
             host = host[4:]
         path = parsed.path.rstrip("/").lower()
-        return f"{host}{path}"
+        keep = []
+        for k, v in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True):
+            if k.lower() in _URL_KEEP_PARAMS and v:
+                keep.append(f"{k}={v}")
+        keep.sort()  # 参数顺序无关
+        return f"{host}{path}?{'&'.join(keep)}" if keep else f"{host}{path}"
     except Exception:
         return (url or "").lower()
 

@@ -83,7 +83,9 @@ def run_single_engine(query: str, engine: str, max_results: int, browser: bool, 
 
 
 def run_full_copy(query: str, max_results: int, browser: bool, ad_filter: str, category: str, engines_csv: str, safe: bool = False) -> List[Dict]:
-    """跑一“份”：全部引擎一次聚合搜索（sub-script 内部会自己汇总去重+广告过滤）。"""
+    """跑一“份”：全部引擎一次聚合搜索（sub-script 内部会自己汇总去重+广告过滤）。
+    返回 [] 表示无结果；超时时返回 [{"_timed_out": True}] 占位（调用方据此区分
+    "搜不到" 和 "被超时杀掉"，不再静默吞）。"""
     script = BASE_DIR / "scripts" / ("search_browser.py" if browser else "search.py")
     cmd = [
         sys.executable,
@@ -102,6 +104,10 @@ def run_full_copy(query: str, max_results: int, browser: bool, ad_filter: str, c
         cmd += ["--engines", engines_csv]
     else:
         cmd += ["--category", category or "all"]
+    # 超时按引擎规模放大：all 分类轻量版 17 引擎/浏览器版 9 引擎，
+    # 每引擎浏览器最坏 ~36s，固定 120s 必超 → 整份静默变空
+    n_engines = max(1, len([e for e in engines_csv.split(",") if e])) if engines_csv else 9
+    timeout_sec = 60 + n_engines * (40 if browser else 8)
     try:
         proc = subprocess.run(
             cmd,
@@ -109,11 +115,15 @@ def run_full_copy(query: str, max_results: int, browser: bool, ad_filter: str, c
             text=True,
             encoding="utf-8",
             errors="ignore",
-            timeout=120,
+            timeout=timeout_sec,
         )
         data = json.loads(proc.stdout)
-    except Exception:
-        return []
+    except subprocess.TimeoutExpired:
+        print(f"[copy] 超时(>{timeout_sec}s)被杀：{query[:40]} 引擎数≈{n_engines}", file=sys.stderr)
+        return [{"_timed_out": True}]
+    except Exception as exc:
+        print(f"[copy] 进程异常: {exc}", file=sys.stderr)
+        return [{"_timed_out": True, "_error": str(exc)}]
     return data.get("results", [])
 
 
@@ -312,7 +322,12 @@ def mega_search(
 
         new_keys = 0
         raw_this_round = 0
+        timed_out_copies = 0
         for copy_id, results in enumerate(copy_results):
+            # 超时占位符不算结果，只计数（rounds_info 里可见"超时被杀"而非"搜不到"）
+            if results and results[0].get("_timed_out"):
+                timed_out_copies += 1
+                continue
             raw_this_round += len(results)
             for r in results:
                 title = r.get("title", "")
@@ -342,9 +357,10 @@ def mega_search(
                 if not item["snippet"] and r.get("snippet"):
                     item["snippet"] = r["snippet"]
         total_raw += raw_this_round
-        rounds_info.append(
-            {"round": round_no, "raw_results": raw_this_round, "new_unique": new_keys, "unique_so_far": len(merged)}
-        )
+        round_info = {"round": round_no, "raw_results": raw_this_round, "new_unique": new_keys, "unique_so_far": len(merged)}
+        if timed_out_copies:
+            round_info["timed_out_copies"] = timed_out_copies
+        rounds_info.append(round_info)
         # 收敛判定：非首轮且没有新结果 → 稳定了，停；首轮就空 → 也停
         if new_keys == 0 and (round_no > 1 or not merged):
             converged = True
@@ -458,8 +474,8 @@ def main(argv=None):
     parser.add_argument("--query", required=True, help="搜索标题/关键词")
     parser.add_argument(
         "--engines",
-        default=",".join(DEFAULT_ENGINES),
-        help="逗号分隔的引擎，默认 so360,sogou,bing",
+        default=None,
+        help="逗号分隔的引擎，默认 so360,sogou,bing；显式传入（含恰好等于默认串）一律尊重不覆盖",
     )
     parser.add_argument("--max-results", type=int, default=5, help="每个引擎取多少条")
     parser.add_argument("--browser", action="store_true", help="使用浏览器版搜索")
@@ -484,7 +500,9 @@ def main(argv=None):
     )
     args = parser.parse_args(argv)
 
-    engines = [e.strip().lower() for e in args.engines.split(",") if e.strip()]
+    # None=用户没传 → 用默认；传了（哪怕恰好等于默认串）都算显式指定，不覆盖
+    engines_csv_user = args.engines or ""
+    engines = [e.strip().lower() for e in engines_csv_user.split(",") if e.strip()]
     if not engines:
         engines = DEFAULT_ENGINES
 
@@ -496,7 +514,7 @@ def main(argv=None):
             browser=args.browser,
             max_rounds=max(1, args.rounds),
             ad_filter=args.ad_filter,
-            engines_csv=",".join(engines) if args.engines and args.engines != ",".join(DEFAULT_ENGINES) else "",
+            engines_csv=engines_csv_user,
             safe=args.safe,
         )
     else:
