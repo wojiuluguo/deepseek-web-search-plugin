@@ -4,7 +4,9 @@
 
 OpenClaw Skill：让 DeepSeek 模型能搜索、会搜索、并且"该搜就搜"，还能自动下载网页里的视频/音频/图片/文件，多模态模型还能"看页面+操作页面"。
 
-> 当前版本 **v1.12.4**（2026-08-22）· 作者：user · [更新记录](#更新记录)
+> 当前版本 **v1.12.5**（2026-08-22）· 作者：user · [更新记录](#更新记录)
+
+<p align="center"><img src=".github/mascot.png" alt="deepseek-web-search 吉祥物" width="220"></p>
 
 ## 功能总览
 
@@ -190,6 +192,15 @@ deepseek-web-search-plugin/
 - APP 引流陷阱页（只跳应用商店无真文件）会如实报 `app_only: true`，这是站点本身不提供网页端下载，非脚本缺陷。
 
 ## 更新记录
+
+### v1.12.5（2026-08-22）
+
+视觉会话健壮性 + 仓库打磨：
+
+- 视觉会话：`--method vision` 启动后首屏状态现在带 `vision_capable` 和 `model` 字段（AI 进会话第一眼就能判定自己是否支持视觉）
+- 视觉会话：`eval` 指令新增 10s 死循环看门狗——用户/恶意 prompt 发的 `while(true){}` 等会卡死 JS 时，DevTools HTTP `/json/close` 端点强杀页面，会话自动重建（再也不会永久卡死）
+- Bug 修复：`own_search.py download` 和 `own_search.py seed` 补上 subprocess 超时（1800s / 300s），下游卡死不再拖死父进程
+- 仓库：新增项目吉祥物 `.github/mascot.png`，已嵌入两个 README 页面
 
 ### v1.12.4（2026-08-22）
 
