@@ -2071,8 +2071,8 @@ def _screenshot_standalone(url: str, output_dir: Path, headed: bool = False, saf
 
 # 视觉会话支持的鼠标/键盘动作（官方 Vision 模型 + Playwright 鼠标 API 对齐）
 VISION_ACTIONS = ("click", "dblclick", "right_click", "move", "scroll",
-                  "type", "press", "goto", "back", "forward", "reload",
-                  "wait", "screenshot", "eval", "quit")
+                  "type", "press", "focus", "goto", "back", "forward",
+                  "reload", "wait", "screenshot", "eval", "quit")
 
 
 def _vision_exec_action(page, cmd: Dict, output_dir: Path, prefix: str) -> Dict:
@@ -2094,6 +2094,15 @@ def _vision_exec_action(page, cmd: Dict, output_dir: Path, prefix: str) -> Dict:
             page.keyboard.type(str(cmd.get("text", "")), delay=30)
         elif act == "press":
             page.keyboard.press(str(cmd.get("key", "Enter")))
+        elif act == "focus":
+            # 按 CSS 选择器聚焦元素（比裸坐标点更可靠：盲点坐标会打到 BODY 上输入失效）
+            sel = str(cmd.get("selector", ""))
+            if not sel:
+                return {"ok": False, "note": "focus needs 'selector' (CSS, e.g. input[name=q])"}
+            el = page.locator(sel).first
+            el.focus(timeout=3000)
+            tag = el.evaluate("e => e.tagName")
+            return {"ok": True, "note": f"focused {tag} via {sel}"}
         elif act == "goto":
             page.goto(str(cmd.get("url", "")), wait_until="domcontentloaded", timeout=30000)
             _wait_for_render(page)
@@ -2131,6 +2140,7 @@ def _vision_route(url: str, output_dir: Path, headed: bool = False, safe: bool =
          {"action":"scroll","x":0,"y":600}      滚动（y 正=向下）
          {"action":"type","text":"关键词"}       键盘输入
          {"action":"press","key":"Enter"}       按键
+         {"action":"focus","selector":"input[name=q]"}  按 CSS 选择器聚焦（输入前先 focus 比裸坐标点更可靠）
          {"action":"goto","url":"https://.."}   跳转 / back / forward / reload
          {"action":"wait","ms":800}             等待（等动画/懒加载）
          {"action":"screenshot"}                主动重新截图
