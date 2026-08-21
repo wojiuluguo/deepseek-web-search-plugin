@@ -13,3 +13,5 @@ scripts/_tmp*
 
 # gh CLI 本地认证目录（含令牌，绝不提交）
 .gh/
+
+dist/
