@@ -2,9 +2,9 @@
 
 English | **[中文](README.zh-CN.md)**
 
-An [OpenClaw](https://github.com/openclaw) skill that gives DeepSeek real web search **and** an auto-save browser that downloads videos/audio/images/files from any webpage it opens.
+An [OpenClaw](https://github.com/openclaw) skill that gives DeepSeek real web search **and** an auto-save browser that downloads videos/audio/images/files from any webpage it opens — plus a vision mode for multimodal models (see a page, operate a page).
 
-> Current version **v1.11.1** (2026-08-21)
+> Current version **v1.12.0** (2026-08-21)
 
 ## Feature Overview
 
@@ -17,6 +17,7 @@ An [OpenClaw](https://github.com/openclaw) skill that gives DeepSeek real web se
 | Search + auto-cache | `search_and_cache.py` | Auto-detects and caches media from result pages after search |
 | Local standalone search engine | `own_search.py` | Self-built SQLite index; external search only discovers seed URLs |
 | Auto-save browser | `auto_save_browser.py` | Opens webpages and auto-saves videos/audio/images/files/article text |
+| Vision mode (multimodal) | `auto_save_browser.py` | Screenshots + screen info fed to vision models; mouse/keyboard control session (for deepseek-v4-flash-vision-exp) |
 | Capture verification | `verify_capture.py` | ffmpeg real-decode duration check, inflation detection, segment merge validation |
 
 Default search engines: Bing, Sogou, 360, Baidu (China-first); DuckDuckGo only for external/manual queries; optional Tavily, Brave Search, SearXNG (auto-enabled via environment variables).
@@ -90,7 +91,27 @@ python scripts/own_search.py search --query "OpenClaw" --json
 
 # Verify captures (real decoded duration + inflation detection)
 python scripts/verify_capture.py --dir "downloads/cache/xxx"
+
+# Vision mode (multimodal models): one-shot page screenshot
+python scripts/auto_save_browser.py --url "..." --method text --screenshot --model deepseek-v4-flash-vision-exp --json
+
+# Vision mode: operate a page like a human (JSON commands via stdin, screenshots + state via stdout)
+python scripts/auto_save_browser.py --url "..." --method vision --model deepseek-v4-flash-vision-exp --json
 ```
+
+## Vision Mode (for multimodal models, v1.12.0)
+
+Adapts the official `deepseek-v4-flash-vision-exp` multimodal model (released 2026-08-21): gives the model "eyes" and "hands".
+
+| Capability | Usage | Description |
+|---|---|---|
+| Page screenshots | Add `--screenshot` to any command | Opens page → lazy-load scroll → full-page PNG + screen info; ultra-tall pages auto-segmented (official max edge 8192px) |
+| Vision session | `--method vision` | Send JSON commands line-by-line via stdin (click/right_click/dblclick/move/scroll/type/press/goto/back/forward/reload/wait/screenshot/eval/quit); each step returns a screenshot + screen state on stdout |
+| Screen info | Auto-output each step | Viewport size, full-page size, DPR, mouse coordinates, scroll position — the model computes click coordinates from these |
+| Model detection | `--model <name>` | Name contains "vision" = multimodal; outputs `vision_capable` + `api_hint` (official API params, copy-paste into requests) |
+| Cost guard | `--max-screenshots` (default 30) / `--shot-detail low` | Each screenshot ≤384 tokens (official cap); auto-stops when limit hit; low = 512×512 budget mode |
+
+**Official parameter basis** (api-docs.deepseek.com/guides/vision): images are tokenized by size, capped at 384 tokens each; formats JPEG/PNG/GIF/WebP (detected from actual content); three input methods — base64 inline (48 MiB body limit), external URL, or Files API; images may only appear in user messages.
 
 ## Download Reliability Design (auto_save_browser.py)
 

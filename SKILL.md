@@ -1,7 +1,7 @@
 ---
 name: deepseek-web-search
 description: DeepSeek 联网搜索技能。遇到实时信息、事实核查、新闻、价格、代码报错、未知名词或用户说“搜一下”时，必须使用本技能搜索并附来源。
-version: 1.11.1
+version: 1.12.0
 updated: 2026-08-21
 author: user
 license: MIT
@@ -30,6 +30,8 @@ tags: [web, search, deepseek, 联网, 搜索]
 | 校验抓包产物/分正片垃圾/查虚标 | `verify_capture.py --dir <产物目录>` |
 | 网站可疑/怕挖矿病毒/保护本机 | 任何命令加 `--safe`（安全模式） |
 | 自己的本地索引 | `own_search.py search` |
+| 看页面长什么样（多模态模型专用） | 任意命令加 `--screenshot`：整页截图(PNG)+屏幕信息喂给视觉模型 |
+| 像人一样看着屏幕操作页面（多模态专用） | `auto_save_browser.py --url ... --method vision`：截图+鼠标键盘控制会话 |
 
 ## 何时必须搜索
 
@@ -62,6 +64,36 @@ tags: [web, search, deepseek, 联网, 搜索]
 - 需要完整分析：用默认 `--json`
 - `--max-results` 按需给：查事实 3 条够，找资料 6-8 条，深度调研用 `--mega`
 - 抓正文给 `web_fetch` 时 `maxChars` 控制在 8000 以内
+
+## 视觉模式（多模态模型专用，v1.12.0）
+
+**先自检**：只有你自己是多模态模型（如 `deepseek-v4-flash-vision-exp`）才能用视觉功能——普通模型传图 API 直接报错。把模型名通过 `--model` 传给工具，输出 `vision_capable` 告诉你能不能用。
+
+**开关权在你（AI）**：截图不是免费的（每张 ≤384 token）。用户没明确要求"看页面/操作页面"时默认不开；需要看清页面布局/界面问题/图表时才值得开。用户要求时随时开。
+
+| 场景 | 用法 |
+|---|---|
+| 一次性看页面长什么样 | 任意下载命令加 `--screenshot`：任务后自动整页截图（懒加载已触发）+ 屏幕信息，路径在 JSON `screenshots` 字段 |
+| 像人一样操作页面 | `--method vision` 视觉会话：stdin 逐行发指令 JSON，stdout 收截图+屏幕状态 |
+
+**视觉会话指令**（一行一个 JSON）：
+
+```json
+{"action":"click","x":100,"y":200}     // 左键点击（视口坐标）
+{"action":"right_click","x":100,"y":200}
+{"action":"move","x":300,"y":150}      // 先移鼠标看清位置再点
+{"action":"scroll","x":0,"y":600}      // 滚动（y 正=向下）
+{"action":"type","text":"搜索词"}
+{"action":"press","key":"Enter"}
+{"action":"goto","url":"https://..."}
+{"action":"wait","ms":800}
+{"action":"eval","js":"document.title"}
+{"action":"quit"}
+```
+
+**每步输出状态**：`screenshot`（最新截图路径）+ `screen`（视口尺寸/整页尺寸/DPR/鼠标位置/滚动位置——你据此判断坐标）+ `screenshots_used/max`（成本计数）+ `api_hint`（官方 API 参数照抄即可拼请求：base64 内联、detail 等级、384 token 封顶）。
+
+**成本防护**：`--max-screenshots`（默认 30）封顶截图数，超限自动停截图只报状态；`--shot-detail low` 用 512×512 省钱模式。别每动一下就截一张——先看屏幕信息判断，必要时才截。
 
 ## 依赖安装（AI 自动处理，不要让用户手动装）
 

@@ -1901,6 +1901,326 @@ def _page_fetch_download(page, url: str, output_dir: Path, safe: bool = False) -
             "content_type": ct, "via": "page-fetch"}
 
 
+# ---------- 视觉线：截图 + 屏幕信息 + 鼠标控制（多模态模型适配，v1.12.0）----------
+# 官方依据（api-docs.deepseek.com/guides/vision）：
+#   模型 deepseek-v4-flash-vision-exp：接受图片+文本混合输入（普通 V4-Flash/Pro 传图直接报错）
+#   格式 JPEG/PNG/GIF/WebP（按文件实际内容判断）；单张图片 token 计费封顶 384
+#   图片传入：base64 内联（48MiB 请求体限制）/ 外部 URL（≤8192 字符, 32MiB, 60s）/ Files API（64MiB）
+#   detail 等级：low=压到 512×512 更省 / original=原图 / auto=原图；单次请求最多 600 张
+#   图片只能出现在 user 消息里（Chat Completions / Anthropic Messages）
+
+VISION_MODEL_NAME = "deepseek-v4-flash-vision-exp"
+VISION_MAX_IMAGE_EDGE = 8192      # 官方图片最长边上限（px），超长页面必须分段
+VISION_SEGMENT_MAX_PX = 6000      # 分段截图单段高度上限（留余量，每段原始分辨率比一张巨图看得清）
+VISION_DEFAULT_MAX_SCREENS = 30   # 视觉会话单次截图数上限（成本防护：每张≤384 token）
+
+# 鼠标位置跟踪（注入页面：视觉会话里模型操作后能读到"鼠标现在在哪"）
+MOUSE_TRACK_JS = """
+window.__mx = 0; window.__my = 0;
+document.addEventListener('mousemove', e => { window.__mx = e.clientX; window.__my = e.clientY; });
+"""
+
+
+def _is_vision_model(model: str) -> bool:
+    """判定模型是否支持视觉（多模态）。官方目前仅 deepseek-v4-flash-vision-exp
+    接受图片输入（名称含 vision），普通模型传图会直接报错。"""
+    return bool(model) and "vision" in model.lower()
+
+
+def _vision_api_hint(detail: str = "original") -> Dict:
+    """喂给调用方 AI 的官方 API 参数提示（照官方文档拼请求用）。"""
+    return {
+        "model": VISION_MODEL_NAME,
+        "detail": detail,                       # low=512×512 更省 token / original=原图
+        "max_tokens_per_image": 384,            # 单张 token 封顶（成本估算用）
+        "image_formats": ["JPEG", "PNG", "GIF", "WebP"],
+        "send_as": "base64 data URL 或 Files API file_id",
+        "note": "图片只能放 user 消息；本工具产出的 PNG 直接 base64 内联即可",
+    }
+
+
+def _screen_info(page) -> Dict:
+    """屏幕/页面/鼠标信息（让视觉模型知道屏幕多大、页面多长、鼠标在哪）。"""
+    try:
+        info = page.evaluate(
+            """() => ({
+                vw: window.innerWidth, vh: window.innerHeight,
+                pw: Math.max(document.documentElement.scrollWidth, document.body ? document.body.scrollWidth : 0),
+                ph: Math.max(document.documentElement.scrollHeight, document.body ? document.body.scrollHeight : 0),
+                dpr: window.devicePixelRatio || 1,
+                mx: window.__mx || 0, my: window.__my || 0,
+                sy: window.scrollY || document.documentElement.scrollTop || 0,
+            })"""
+        ) or {}
+    except Exception:
+        info = {}
+    return {
+        "viewport": {"width": info.get("vw", 0), "height": info.get("vh", 0)},
+        "page": {"width": info.get("pw", 0), "height": info.get("ph", 0)},
+        "device_pixel_ratio": info.get("dpr", 1),
+        "mouse": {"x": info.get("mx", 0), "y": info.get("my", 0)},
+        "scroll_y": info.get("sy", 0),
+        "url": page.url,
+    }
+
+
+def _scroll_page_to_bottom(page, step_px: int = 1200, pause_ms: int = 500, max_steps: int = 40) -> bool:
+    """逐步滚到底触发懒加载（Playwright full_page 截图不会触发懒加载，必须先滚）。"""
+    try:
+        for _ in range(max_steps):
+            before = page.evaluate("window.scrollY")
+            page.mouse.wheel(0, step_px)
+            page.wait_for_timeout(pause_ms)
+            after = page.evaluate("window.scrollY")
+            ph = page.evaluate("Math.max(document.documentElement.scrollHeight, document.body ? document.body.scrollHeight : 0)")
+            if after <= before or after >= ph - page.evaluate("window.innerHeight"):
+                break
+        return True
+    except Exception:
+        return False
+
+
+def _capture_full_page(page, output_dir: Path, prefix: str = "page",
+                       segment_max_px: int = VISION_SEGMENT_MAX_PX) -> List[str]:
+    """整页截图：滚底触发懒加载 → 回顶 → 全页 PNG；页面超高（>8192px 官方上限）自动
+    分段（每段原始分辨率）。返回截图路径列表。"""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    _scroll_page_to_bottom(page)
+    try:
+        page.evaluate("window.scrollTo(0, 0)")
+        page.wait_for_timeout(600)
+    except Exception:
+        pass
+    try:
+        ph = page.evaluate("Math.max(document.documentElement.scrollHeight, document.body ? document.body.scrollHeight : 0)")
+        vw = page.evaluate("window.innerWidth")
+    except Exception:
+        ph, vw = 0, 0
+    stamp = int(time.time())
+    paths: List[str] = []
+    try:
+        if 0 < ph <= VISION_MAX_IMAGE_EDGE:
+            # 单张全页截图（高度在官方上限内）
+            p = output_dir / f"{prefix}_{stamp}_full.png"
+            page.screenshot(path=str(p), full_page=True)
+            paths.append(str(p))
+        elif ph > VISION_MAX_IMAGE_EDGE:
+            # 超高页面：按 scroll 位置分段截（clip 顶部对齐滚动点），每段原始分辨率
+            seg = 0
+            y = 0
+            while y < ph and seg < 20:
+                h = min(segment_max_px, ph - y)
+                p = output_dir / f"{prefix}_{stamp}_seg{seg}.png"
+                page.screenshot(path=str(p), clip={"x": 0, "y": y, "width": vw, "height": h})
+                paths.append(str(p))
+                y += h
+                seg += 1
+    except Exception:
+        pass
+    return paths
+
+
+def _shot_viewport(page, output_dir: Path, prefix: str = "screen") -> Optional[str]:
+    """当前视口截图（视觉会话每步操作后的"屏幕快照"）。"""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    p = output_dir / f"{prefix}_{int(time.time() * 1000)}.png"
+    try:
+        page.screenshot(path=str(p))
+        return str(p)
+    except Exception:
+        return None
+
+
+def _screenshot_standalone(url: str, output_dir: Path, headed: bool = False, safe: bool = False) -> Dict:
+    """独立截图（--screenshot 标志，配任意模式）：打开页面→渲染等待→懒加载→整页/分段截图。
+    不干扰原模式逻辑，截图结果合并进 JSON。"""
+    result: Dict = {"screenshots": [], "screen": {}}
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        result["error"] = "playwright not installed"
+        return result
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=not headed, args=_browser_launch_args(safe))
+            try:
+                context = browser.new_context(
+                    user_agent=random.choice(USER_AGENTS),
+                    viewport={"width": 1920, "height": 1080},
+                    locale="zh-CN", timezone_id="Asia/Shanghai",
+                    ignore_https_errors=True,
+                    **({"service_workers": "block"} if safe else {}),
+                )
+                context.add_init_script(STEALTH_JS + MOUSE_TRACK_JS)
+                page = context.new_page()
+                if safe:
+                    _setup_safe_mode(context, page)
+                page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                _wait_for_render(page)
+                shot_dir = output_dir / "screenshots"
+                result["screenshots"] = _capture_full_page(page, shot_dir)
+                result["screen"] = _screen_info(page)
+            finally:
+                browser.close()
+    except Exception as exc:
+        result["error"] = f"screenshot error: {exc}"
+    return result
+
+
+# 视觉会话支持的鼠标/键盘动作（官方 Vision 模型 + Playwright 鼠标 API 对齐）
+VISION_ACTIONS = ("click", "dblclick", "right_click", "move", "scroll",
+                  "type", "press", "goto", "back", "forward", "reload",
+                  "wait", "screenshot", "eval", "quit")
+
+
+def _vision_exec_action(page, cmd: Dict, output_dir: Path, prefix: str) -> Dict:
+    """执行一条视觉会话指令，返回 {ok, note}。指令格式见 _vision_route 文档。"""
+    act = (cmd.get("action") or "").strip().lower()
+    x, y = cmd.get("x", 0), cmd.get("y", 0)
+    try:
+        if act == "click":
+            page.mouse.click(x, y)
+        elif act == "dblclick":
+            page.mouse.dblclick(x, y)
+        elif act == "right_click":
+            page.mouse.click(x, y, button="right")
+        elif act == "move":
+            page.mouse.move(x, y)
+        elif act == "scroll":
+            page.mouse.wheel(x, cmd.get("y", 600))  # x=横向增量, y=纵向增量（正=向下）
+        elif act == "type":
+            page.keyboard.type(str(cmd.get("text", "")), delay=30)
+        elif act == "press":
+            page.keyboard.press(str(cmd.get("key", "Enter")))
+        elif act == "goto":
+            page.goto(str(cmd.get("url", "")), wait_until="domcontentloaded", timeout=30000)
+            _wait_for_render(page)
+        elif act == "back":
+            page.go_back(timeout=15000)
+        elif act == "forward":
+            page.go_forward(timeout=15000)
+        elif act == "reload":
+            page.reload(wait_until="domcontentloaded", timeout=30000)
+        elif act == "wait":
+            page.wait_for_timeout(int(cmd.get("ms", 1000)))
+        elif act == "eval":
+            return {"ok": True, "note": str(page.evaluate(str(cmd.get("js", "1+1"))))[:400]}
+        elif act in ("screenshot", "quit"):
+            pass  # 由调用方处理
+        else:
+            return {"ok": False, "note": f"unknown action: {act}（支持: {', '.join(VISION_ACTIONS)}）"}
+        return {"ok": True, "note": ""}
+    except Exception as exc:
+        return {"ok": False, "note": f"{act} failed: {exc}"}
+
+
+def _vision_route(url: str, output_dir: Path, headed: bool = False, safe: bool = False,
+                  max_screens: int = VISION_DEFAULT_MAX_SCREENS,
+                  detail: str = "original", model: str = "") -> Dict:
+    """视觉会话模式（--method vision）：给多模态模型的"眼睛+手"。
+
+    协议（stdin/stdout 各一行一个 JSON，AI Agent 驱动）：
+      1. 启动后 stdout 输出初始状态（首屏截图 + 屏幕信息）
+      2. AI 逐行往 stdin 写指令 JSON，例如：
+         {"action":"click","x":100,"y":200}   左键点击（坐标=视口像素）
+         {"action":"right_click","x":..,"y":..} 右键 / {"action":"dblclick",...} 双击
+         {"action":"move","x":..,"y":..}        移动鼠标（视觉模型先看再点）
+         {"action":"scroll","x":0,"y":600}      滚动（y 正=向下）
+         {"action":"type","text":"关键词"}       键盘输入
+         {"action":"press","key":"Enter"}       按键
+         {"action":"goto","url":"https://.."}   跳转 / back / forward / reload
+         {"action":"wait","ms":800}             等待（等动画/懒加载）
+         {"action":"screenshot"}                主动重新截图
+         {"action":"eval","js":"1+1"}           执行 JS（只读用途，返回值放 note）
+         {"action":"quit"}                      结束会话
+      3. 每条指令执行后 stdout 输出新状态（新截图 + 屏幕信息），直到 quit 或 stdin 关闭
+
+    状态 JSON 字段：
+      event="state" | screenshot=最新截图路径 | screen=屏幕信息（视口/整页尺寸/DPR/鼠标/滚动）
+      screenshots_used/max=截图计数（成本防护：单张≤384 token，超上限不再截图只报状态）
+      api_hint=官方 API 调用参数（model/detail/384token 封顶等，照抄即可拼请求）
+    """
+    base = {"mode": "vision_session", "source_url": url, "output_dir": str(output_dir),
+            "model": model or VISION_MODEL_NAME,
+            "vision_capable": _is_vision_model(model) if model else True}
+    shots_used = 0
+    all_shots: List[str] = []
+
+    def _emit_state(page, done: bool = False, note: str = ""):
+        nonlocal shots_used
+        shot = None
+        if shots_used < max_screens:
+            shot = _shot_viewport(page, output_dir)
+            if shot:
+                shots_used += 1
+                all_shots.append(shot)
+        state = {
+            "event": "state",
+            "done": done,
+            "screenshot": shot or (all_shots[-1] if all_shots else None),
+            "screen": _screen_info(page),
+            "screenshots_used": shots_used,
+            "screenshots_max": max_screens,
+            "screenshot_budget_exhausted": shots_used >= max_screens,
+            "api_hint": _vision_api_hint(detail),
+        }
+        if note:
+            state["note"] = note
+        print(json.dumps(state, ensure_ascii=False), flush=True)
+        return state
+
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return {**base, "error": "playwright not installed"}
+
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=not headed, args=_browser_launch_args(safe))
+            try:
+                context = browser.new_context(
+                    user_agent=random.choice(USER_AGENTS),
+                    viewport={"width": 1920, "height": 1080},
+                    locale="zh-CN", timezone_id="Asia/Shanghai",
+                    ignore_https_errors=True,
+                    **({"service_workers": "block"} if safe else {}),
+                )
+                context.add_init_script(STEALTH_JS + MOUSE_TRACK_JS)
+                page = context.new_page()
+                if safe:
+                    _setup_safe_mode(context, page)
+                page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                _wait_for_render(page)
+                _emit_state(page)
+                # 指令循环：stdin 逐行 JSON → 执行 → 输出新状态（EOF/quit 退出）
+                for line in sys.stdin:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        cmd = json.loads(line)
+                    except Exception:
+                        _emit_state(page, note="invalid json command")
+                        continue
+                    act = (cmd.get("action") or "").strip().lower()
+                    if act == "quit":
+                        _emit_state(page, done=True, note="session closed")
+                        break
+                    r = _vision_exec_action(page, cmd, output_dir, "vision")
+                    if act == "screenshot":
+                        r = {"ok": True, "note": ""}
+                    if act in ("goto", "reload", "back", "forward"):
+                        page.wait_for_timeout(800)
+                    _emit_state(page, note=r.get("note", ""))
+            finally:
+                browser.close()
+        return {**base, "count": len(all_shots), "screenshots": all_shots,
+                "screenshots_used": shots_used, "api_hint": _vision_api_hint(detail)}
+    except Exception as exc:
+        return {**base, "count": len(all_shots), "screenshots": all_shots,
+                "screenshots_used": shots_used, "error": f"vision session error: {exc}"}
+
+
 def _files_route(
     url: str, output_dir: Path, headed: bool = False, safe: bool = False,
     zip_bundle: bool = False, click_download: bool = False,
@@ -2213,6 +2533,9 @@ def auto_save_url(
     max_chapters: int = 100,
     allow_chapters: bool = True,
     click_download: bool = False,
+    vision_max_screens: int = VISION_DEFAULT_MAX_SCREENS,
+    vision_detail: str = "original",
+    model_name: str = "",
 ) -> Dict:
     """
     核心逻辑：
@@ -2273,6 +2596,12 @@ def auto_save_url(
     if method == "files":
         return _files_route(url, output_dir, headed=headed, safe=safe,
                             zip_bundle=zip_bundle, click_download=click_download)
+
+    # vision：视觉会话模式（多模态模型的"眼睛+手"，stdin/stdout JSON 协议驱动）
+    if method == "vision":
+        return _vision_route(url, output_dir, headed=headed, safe=safe,
+                             max_screens=vision_max_screens, detail=vision_detail,
+                             model=model_name)
 
     # direct：只尝试直接下载直链媒体文件。
     if method == "direct":
@@ -2783,9 +3112,31 @@ def main(argv=None):
     )
     parser.add_argument(
         "--method",
-        choices=["chain", "direct", "browser", "cache", "ytdlp", "auto", "harvest", "files", "text"],
+        choices=["chain", "direct", "browser", "cache", "ytdlp", "auto", "harvest", "files", "text", "vision"],
         default=None,
-        help="不指定=自动选路(视频/直链→chain, 照片页/音频页→harvest, 文件→files, --media-type text→text); chain=自动按顺序尝试 direct→ytdlp→browser→cache→text; direct=直链下载; browser=真实浏览器边播边缓存; cache=额外抓206分段缓存; ytdlp=直接下载; auto=先yt-dlp,失败再浏览器; harvest=DOM/JSON收割+页面上下文下载(快,适合照片/音频); files=文件专用线(压缩包/文档,支持整页批量+--zip打包); text=文本专用线(文章正文提取/小说目录逐章合并/txt直链直下,--max-chapters控制章节数上限)",
+        help="不指定=自动选路(视频/直链→chain, 照片页/音频页→harvest, 文件→files, --media-type text→text); chain=自动按顺序尝试 direct→ytdlp→browser→cache→text; direct=直链下载; browser=真实浏览器边播边缓存; cache=额外抓206分段缓存; ytdlp=直接下载; auto=先yt-dlp,失败再浏览器; harvest=DOM/JSON收割+页面上下文下载(快,适合照片/音频); files=文件专用线(压缩包/文档,支持整页批量+--zip打包); text=文本专用线(文章正文提取/小说目录逐章合并/txt直链直下,--max-chapters控制章节数上限); vision=视觉会话(多模态模型的眼睛+手:截图+屏幕信息+鼠标键盘控制,stdin/stdout JSON协议)",
+    )
+    parser.add_argument(
+        "--model",
+        default=None,
+        help="AI 告诉本工具自己用的模型名（如 deepseek-v4-flash-vision-exp）：名称含 vision 判定支持视觉，输出 vision_capable 供决策；普通模型传图会报错所以别开视觉功能",
+    )
+    parser.add_argument(
+        "--screenshot",
+        action="store_true",
+        help="截图模式（配任意下载模式）：任务完成后独立打开页面→懒加载滚动→整页/分段截图(PNG)+屏幕信息，合并进 JSON。给多模态模型看页面用（每张≤384 token）",
+    )
+    parser.add_argument(
+        "--shot-detail",
+        choices=["low", "original", "auto"],
+        default="original",
+        help="视觉模式截图精细度（对应官方 API detail 参数）：low=512×512 更省 token；original=原图更清楚（默认）",
+    )
+    parser.add_argument(
+        "--max-screenshots",
+        type=int,
+        default=VISION_DEFAULT_MAX_SCREENS,
+        help=f"视觉会话单次截图数上限（成本防护，默认 {VISION_DEFAULT_MAX_SCREENS}：每张≤384 token，防失控烧钱）",
     )
     parser.add_argument(
         "--zip",
@@ -2826,7 +3177,7 @@ def main(argv=None):
 
     if args.url:
         # --url 自动选路：照片页/音频页走 harvest 专用线，文件走 files 专用线，视频/直链走 chain（原路不变）。
-        # 显式指定 --method 时完全尊重用户选择，不自动改。
+        # 显式指定 --method 时完全尊重用户选择，不自动改。vision 视觉会话是交互模式，不参与自动选路。
         method = _route_method(args.url, args.media_type, args.method)
         auto_routed = args.method is None and method in ("harvest", "files", "text")
         if auto_routed:
@@ -2849,6 +3200,9 @@ def main(argv=None):
                 zip_bundle=args.zip,
                 max_chapters=args.max_chapters,
                 click_download=args.click_download,
+                vision_max_screens=args.max_screenshots,
+                vision_detail=args.shot_detail,
+                model_name=args.model or "",
             )
             # 自动选到 harvest/files 但颗粒无收：退回通用链再试一次（chain 自带优雅降级）。
             if auto_routed and data.get("count", 0) == 0 and not args.click_download:
@@ -2940,6 +3294,25 @@ def main(argv=None):
     else:
         print("使用 --query 时必须加 --auto 才会自动打开并下载。", file=sys.stderr)
         return 2
+
+    # --screenshot 后处理：任意模式跑完后独立截一组页面图（给多模态模型看）。
+    # 不干扰原模式逻辑；vision 会话自带截图就不重复做了。
+    if args.screenshot and args.method != "vision":
+        shot_url = data.get("picked_url") or data.get("source_url") or args.url
+        if shot_url:
+            print(f"[截图] 打开页面截图（给多模态模型看）：{shot_url[:100]}", file=sys.stderr)
+            shot = _screenshot_standalone(shot_url, output_dir, headed=args.headed, safe=args.safe)
+            data["screenshots"] = shot.get("screenshots", [])
+            data["screen"] = shot.get("screen", {})
+            if shot.get("error"):
+                data["screenshot_error"] = shot["error"]
+
+    # --model 视觉能力检测：名称含 vision = 多模态（官方仅 vision 模型接受图片，普通模型传图报错）
+    if args.model:
+        data["model"] = args.model
+        data["vision_capable"] = _is_vision_model(args.model)
+        if _is_vision_model(args.model):
+            data["api_hint"] = _vision_api_hint(args.shot_detail)
 
     if args.json:
         print(json.dumps(data, ensure_ascii=False, indent=2))

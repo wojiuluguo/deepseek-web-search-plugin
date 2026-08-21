@@ -2,9 +2,9 @@
 
 **[English](README.md)** | 中文
 
-OpenClaw Skill：让 DeepSeek 模型能搜索、会搜索、并且"该搜就搜"，还能自动下载网页里的视频/音频/图片/文件。
+OpenClaw Skill：让 DeepSeek 模型能搜索、会搜索、并且"该搜就搜"，还能自动下载网页里的视频/音频/图片/文件，多模态模型还能"看页面+操作页面"。
 
-> 当前版本 **v1.11.1**（2026-08-21）
+> 当前版本 **v1.12.0**（2026-08-21）
 
 ## 功能总览
 
@@ -17,6 +17,7 @@ OpenClaw Skill：让 DeepSeek 模型能搜索、会搜索、并且"该搜就搜"
 | 搜索+自动缓存 | `search_and_cache.py` | 搜完自动检测结果页媒体并缓存 |
 | 本地独立搜索引擎 | `own_search.py` | 自建 SQLite 索引，外部搜索只做种子发现 |
 | 保存型浏览器 | `auto_save_browser.py` | 打开网页自动保存视频/音频/图片/文件/正文 |
+| 视觉模式（多模态） | `auto_save_browser.py` | 截图+屏幕信息喂给视觉模型；鼠标键盘控制会话（适配 deepseek-v4-flash-vision-exp） |
 | 抓包产物校验 | `verify_capture.py` | ffmpeg 真解码验时长、检测虚标、分段合并验证 |
 
 默认搜索引擎：必应、搜狗、360、百度（国内优先）；DuckDuckGo 仅外网/手动指定时使用；可选 Tavily、Brave Search、SearXNG（设环境变量自动启用）。
@@ -92,7 +93,27 @@ python scripts/own_search.py search --query "OpenClaw" --json
 
 # 校验抓包产物（真解码时长 + 虚标检测）
 python scripts/verify_capture.py --dir "downloads/cache/xxx"
+
+# 视觉模式（多模态模型专用）：一次性看页面
+python scripts/auto_save_browser.py --url "..." --method text --screenshot --model deepseek-v4-flash-vision-exp --json
+
+# 视觉模式：像人一样看着屏幕操作页面（stdin 逐行 JSON 指令，stdout 收截图+状态）
+python scripts/auto_save_browser.py --url "..." --method vision --model deepseek-v4-flash-vision-exp --json
 ```
+
+## 视觉模式（多模态模型适配，v1.12.0）
+
+适配官方 `deepseek-v4-flash-vision-exp` 多模态模型（发布于 2026-08-21）：给模型一双"眼睛"和一双"手"。
+
+| 能力 | 用法 | 说明 |
+|---|---|---|
+| 页面截图 | 任意命令加 `--screenshot` | 打开页面→懒加载滚动→整页截图(PNG)+屏幕信息；超长页自动分段（官方单图最长边 8192px） |
+| 视觉会话 | `--method vision` | stdin 逐行发 JSON 指令（click/right_click/dblclick/move/scroll/type/press/goto/back/forward/reload/wait/screenshot/eval/quit），stdout 每步返回截图+屏幕状态 |
+| 屏幕信息 | 每步自动输出 | 视口尺寸、整页尺寸、DPR、鼠标坐标、滚动位置——模型据此算点击坐标 |
+| 模型检测 | `--model <模型名>` | 名称含 vision = 多模态，输出 `vision_capable` + `api_hint`（官方 API 参数，照抄拼请求） |
+| 成本防护 | `--max-screenshots`（默认 30）/ `--shot-detail low` | 每张截图 ≤384 token（官方封顶），超限自动停截图；low=512×512 省钱模式 |
+
+**官方参数依据**（api-docs.deepseek.com/guides/vision）：图片按尺寸换算 token，单张封顶 384；格式 JPEG/PNG/GIF/WebP（按实际内容判断）；base64 内联（48MiB 请求体）/ 外部 URL / Files API 三种传入；图片只能放 user 消息。
 
 ## 下载可靠性设计（auto_save_browser.py）
 
