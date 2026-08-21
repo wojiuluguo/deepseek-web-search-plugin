@@ -2071,8 +2071,72 @@ def _screenshot_standalone(url: str, output_dir: Path, headed: bool = False, saf
 
 # 视觉会话支持的鼠标/键盘动作（官方 Vision 模型 + Playwright 鼠标 API 对齐）
 VISION_ACTIONS = ("click", "dblclick", "right_click", "move", "scroll",
-                  "type", "press", "focus", "goto", "back", "forward",
-                  "reload", "wait", "screenshot", "eval", "quit")
+                  "type", "press", "focus", "elements", "goto", "back",
+                  "forward", "reload", "wait", "screenshot", "eval", "quit")
+
+# 页面元素标注 JS：收集所有可见可点元素 + 视口坐标（视觉模型点前先 elements 拿准坐标，
+# 不用瞎猜截图里的像素位置）
+ELEMENTS_JS = """
+() => {
+    const out = [];
+    const sel = 'a, button, input, select, textarea, [role=button], [onclick], [tabindex]';
+    document.querySelectorAll(sel).forEach(el => {
+        try {
+            const r = el.getBoundingClientRect();
+            if (r.width < 2 || r.height < 2) return;              // 不可见
+            if (r.bottom < 0 || r.top > innerHeight) return;      // 视口外
+            const style = getComputedStyle(el);
+            if (style.visibility === 'hidden' || style.display === 'none') return;
+            const text = (el.innerText || el.value || el.placeholder || el.getAttribute('aria-label') || '')
+                .replace(/\\s+/g, ' ').trim().slice(0, 40);
+            out.push({
+                tag: el.tagName.toLowerCase(),
+                text: text,
+                x: Math.round(r.x + r.width / 2),   // 中心点（直接喂给 click）
+                y: Math.round(r.y + r.height / 2),
+                w: Math.round(r.width),
+                h: Math.round(r.height),
+                type: el.type || '',
+                name: el.name || '',
+            });
+        } catch (e) {}
+    });
+    return out.slice(0, 60);  // 上限 60 个防刷屏
+}
+"""
+
+# 验证码检测 JS：识别常见验证码特征（geetest/recaptcha/hCaptcha/国内滑块/点选）。
+# 检测到只上报不绕过——自动破解验证码违法且违反站点条款，正确姿势是人工接管。
+CAPTCHA_JS = """
+() => {
+    const found = [];
+    // 1. 已知验证码 iframe / class / id 特征
+    const sigs = {
+        geetest: ['.geetest_holder', '.geetest_widget', 'iframe[src*="geetest"]'],
+        recaptcha: ['.recaptcha-checkbox', 'iframe[src*="recaptcha"]', '.g-recaptcha'],
+        hcaptpcha: ['iframe[src*="hcaptcha"]', '.h-captcha'],
+        slider: ['.slider', '.slide-verify', '.nc_wrapper', '[class*="captcha"]'],
+        rotate: ['.rotate-captcha', '[class*="rotate"]'],
+    };
+    for (const [kind, sels] of Object.entries(sigs)) {
+        for (const s of sels) {
+            try {
+                const el = document.querySelector(s);
+                if (el) {
+                    const r = el.getBoundingClientRect();
+                    if (r.width > 10 && r.height > 10) { found.push(kind); break; }
+                }
+            } catch (e) {}
+        }
+    }
+    // 2. 验证码关键词（中文站点常见文案）
+    const body = (document.body ? document.body.innerText : '').slice(0, 20000);
+    if (/请拖动滑块|拖动滑块完成|向右滑动|拖动到最右侧|点击验证|请点击图中|按顺序点击/.test(body)) {
+        found.push('slider_or_click_captcha');
+    }
+    return [...new Set(found)];
+}
+"""
 
 
 def _vision_exec_action(page, cmd: Dict, output_dir: Path, prefix: str) -> Dict:
@@ -2114,6 +2178,11 @@ def _vision_exec_action(page, cmd: Dict, output_dir: Path, prefix: str) -> Dict:
             page.reload(wait_until="domcontentloaded", timeout=30000)
         elif act == "wait":
             page.wait_for_timeout(int(cmd.get("ms", 1000)))
+        elif act == "elements":
+            # 元素标注：返回视口内所有可见可点元素（tag/text/中心坐标/尺寸）。
+            # 视觉模型点按钮前先 elements 拿准坐标，不用从截图里猜像素
+            els = page.evaluate(ELEMENTS_JS) or []
+            return {"ok": True, "note": "", "elements": els}
         elif act == "eval":
             return {"ok": True, "note": str(page.evaluate(str(cmd.get("js", "1+1"))))[:400]}
         elif act in ("screenshot", "quit"):
@@ -2141,6 +2210,7 @@ def _vision_route(url: str, output_dir: Path, headed: bool = False, safe: bool =
          {"action":"type","text":"关键词"}       键盘输入
          {"action":"press","key":"Enter"}       按键
          {"action":"focus","selector":"input[name=q]"}  按 CSS 选择器聚焦（输入前先 focus 比裸坐标点更可靠）
+         {"action":"elements"}                元素标注：返回视口内全部可点元素（tag/text/中心坐标/尺寸），点按钮前先拿这个
          {"action":"goto","url":"https://.."}   跳转 / back / forward / reload
          {"action":"wait","ms":800}             等待（等动画/懒加载）
          {"action":"screenshot"}                主动重新截图
@@ -2165,7 +2235,7 @@ def _vision_route(url: str, output_dir: Path, headed: bool = False, safe: bool =
     shots_used = 0
     all_shots: List[str] = []
 
-    def _emit_state(page, done: bool = False, note: str = ""):
+    def _emit_state(page, done: bool = False, note: str = "", extra: Optional[Dict] = None):
         nonlocal shots_used
         shot = None
         if shots_used < max_screens:
@@ -2173,6 +2243,12 @@ def _vision_route(url: str, output_dir: Path, headed: bool = False, safe: bool =
             if shot:
                 shots_used += 1
                 all_shots.append(shot)
+        # 验证码自动检测（每步都查，检测到立即上报——不绕过，人工接管）
+        captcha = []
+        try:
+            captcha = page.evaluate(CAPTCHA_JS) or []
+        except Exception:
+            pass
         state = {
             "event": "state",
             "done": done,
@@ -2183,8 +2259,14 @@ def _vision_route(url: str, output_dir: Path, headed: bool = False, safe: bool =
             "screenshot_budget_exhausted": shots_used >= max_screens,
             "api_hint": _vision_api_hint(detail),
         }
+        if captcha:
+            state["captcha_detected"] = captcha
+            state["captcha_help"] = ("验证码只检测不绕过（合法合规）。人工接管：用 --headed 重开会话，"
+                                     "人手动完成验证后 AI 发 wait 指令继续")
         if note:
             state["note"] = note
+        if extra:
+            state.update(extra)
         print(json.dumps(state, ensure_ascii=False), flush=True)
         return state
 
@@ -2262,7 +2344,9 @@ def _vision_route(url: str, output_dir: Path, headed: bool = False, safe: bool =
                         r = {"ok": True, "note": ""}
                     if act in ("goto", "reload", "back", "forward"):
                         page.wait_for_timeout(800)
-                    _emit_state(page, note=r.get("note", ""))
+                    # elements 指令的元素清单带进状态（视觉模型直接读坐标点按钮）
+                    extra = {"elements": r["elements"]} if r.get("elements") else None
+                    _emit_state(page, note=r.get("note", ""), extra=extra)
             finally:
                 browser.close()
         return {**base, "count": len(all_shots), "screenshots": all_shots,

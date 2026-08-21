@@ -84,7 +84,8 @@ tags: [web, search, deepseek, 联网, 搜索]
 {"action":"move","x":300,"y":150}      // 先移鼠标看清位置再点
 {"action":"scroll","x":0,"y":600}      // 滚动（y 正=向下）
 {"action":"type","text":"搜索词"}
-{"action":"press","key":"Enter"}
+{"action":"focus","selector":"input[name=q]"}
+{"action":"elements"}
 {"action":"goto","url":"https://..."}
 {"action":"wait","ms":800}
 {"action":"eval","js":"document.title"}
@@ -92,6 +93,10 @@ tags: [web, search, deepseek, 联网, 搜索]
 ```
 
 **每步输出状态**：`screenshot`（最新截图路径）+ `screen`（视口尺寸/整页尺寸/DPR/鼠标位置/滚动位置——你据此判断坐标）+ `screenshots_used/max`（成本计数）+ `api_hint`（官方 API 参数照抄即可拼请求：base64 内联、detail 等级、384 token 封顶）。
+
+**elements 元素标注**（点按钮前先拿这个，不用从截图猜像素）：返回视口内全部可见可点元素 `[{tag, text, x, y, w, h, type, name}]`——x/y 是中心坐标直接喂给 click。
+
+**验证码处理（重要，合法合规）**：每步自动检测验证码（geetest/recaptcha/hCaptcha/滑块/点选），检测到状态里出 `captcha_detected: [类型]` + `captcha_help`。**只检测不绕过**——自动破解验证码违法且违反站点条款。正确姿势：告诉用户"页面有验证码"，用 `--headed` 重开会话让用户手动完成（人过的验证码天经地义），AI 用 `{"action":"wait","ms":5000}` 等用户解完再继续。
 
 **成本防护**：`--max-screenshots`（默认 30）封顶截图数，超限自动停截图只报状态；`--shot-detail low` 用 512×512 省钱模式。别每动一下就截一张——先看屏幕信息判断，必要时才截。
 
