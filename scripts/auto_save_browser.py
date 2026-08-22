@@ -644,6 +644,42 @@ def _inject_login_cookies(context, cookie_file: str, cookies_from_browser: str, 
     return None
 
 
+def _base_domain(host: str) -> str:
+    """取主域（www.douyin.com → douyin.com）。简单两段启发式，
+    com.cn 类三段后缀会取窄一档，接种场景够用（宁可少注不错注）。"""
+    parts = (host or "").lower().strip(".").split(".")
+    return ".".join(parts[-2:]) if len(parts) >= 2 else (host or "")
+
+
+def _login_rescue(context, page, url: str) -> str:
+    """登录兜底（--login-rescue，v1.18.0）：扫码被风控拒发 session 的兜底——
+    自动遍历本机 chrome→edge→firefox，找到含目标域登录 cookie 的那个，
+    接种进当前上下文并刷新页面。人肉在自己浏览器登录目标站（天经地义），
+    工具只负责把登录态搬进来，绕开"自动化环境扫码不作数"的死锁。"""
+    host = (urllib.parse.urlparse(url).hostname or "").lower()
+    if not host:
+        return "login_rescue: URL 无域名，跳过"
+    base = _base_domain(host)
+    for browser in ("chrome", "edge", "firefox"):
+        cookies, err = _browser_cookies_to_playwright(browser)
+        if not cookies:
+            continue  # 该浏览器读不到/没登录过，试下一个
+        hit = [c for c in cookies if (c.get("domain") or "").lstrip(".").endswith(base)]
+        if not hit:
+            continue  # 有 cookie 但不含目标域
+        try:
+            context.add_cookies(hit)
+        except Exception as exc:
+            return f"login_rescue: {browser} cookie 注入失败: {exc}"
+        try:
+            page.reload(wait_until="domcontentloaded", timeout=30000)
+        except Exception:
+            pass
+        return f"login_rescue: 已从 {browser} 接种 {len(hit)} 条 {base} 登录 cookie 并刷新页面"
+    return ("login_rescue: 本机 chrome/edge/firefox 都没有目标站登录态"
+            "（先在自己平时的浏览器里登录一次目标站再试）")
+
+
 def _download_with_ytdlp(url: str, output_dir: Path, safe: bool = False,
                          cookie_file: str = "", cookies_from_browser: str = ""):
     """Try yt-dlp first. Returns (saved_list, error_string).
@@ -2793,6 +2829,16 @@ def _vision_exec_action(page, cmd: Dict, output_dir: Path, prefix: str,
         return {"ok": False, "note": f"{act} 失败: {exc}"}
 
 
+def _skill_version() -> str:
+    """读 package.json 版本号（项目版本唯一真相源）。
+    会话启动横幅用它——日志必须自证版本，杜绝"老副本跑出诡异行为查半天"。"""
+    try:
+        pkg = Path(__file__).resolve().parent.parent / "package.json"
+        return json.loads(pkg.read_text(encoding="utf-8")).get("version", "?")
+    except Exception:
+        return "?"
+
+
 def _vision_route(url: str, output_dir: Path, headed: bool = False, safe: bool = False,
                   max_screens: int = VISION_DEFAULT_MAX_SCREENS,
                   detail: str = "original", model: str = "",
@@ -2803,7 +2849,8 @@ def _vision_route(url: str, output_dir: Path, headed: bool = False, safe: bool =
                   captcha_mode: str = "off",
                   idle_timeout: Optional[int] = None,
                   linger: bool = False,
-                  stealth: str = "full") -> Dict:
+                  stealth: str = "full",
+                  login_rescue: bool = False) -> Dict:
     """视觉会话模式（--method vision）：给多模态模型的"眼睛+手"。
 
     协议（stdin/stdout 各一行一个 JSON，AI Agent 驱动）：
@@ -2903,8 +2950,10 @@ def _vision_route(url: str, output_dir: Path, headed: bool = False, safe: bool =
     try:
         with sync_playwright() as p:
             # 本地调试端口：eval 看门狗用它经 /json/close 强杀死循环页面
-            # （仅绑 127.0.0.1，无对外暴露；其他路线不开，避免多余端口）
-            debug_port = _free_port()
+            # （仅绑 127.0.0.1，无对外暴露；其他路线不开，避免多余端口）。
+            # --profile --headed 的人肉登录场景不开：字节级风控会扫调试端口，
+            # 登录窗口期检测面越小越好（eval 看门狗随之退化为不启用，可接受）
+            debug_port = 0 if (profile_dir and headed) else _free_port()
             browser = None
             context = None
             if profile_dir:
@@ -2915,7 +2964,7 @@ def _vision_route(url: str, output_dir: Path, headed: bool = False, safe: bool =
                     context = p.chromium.launch_persistent_context(
                         user_data_dir=str(profile_dir),
                         headless=not headed,
-                        args=_browser_launch_args(safe) + [f"--remote-debugging-port={debug_port}"],
+                        args=_browser_launch_args(safe) + ([f"--remote-debugging-port={debug_port}"] if debug_port else []),
                         user_agent=USER_AGENTS[0],
                         viewport={"width": viewport_w, "height": viewport_h},
                         locale="zh-CN", timezone_id="Asia/Shanghai",
@@ -2929,7 +2978,7 @@ def _vision_route(url: str, output_dir: Path, headed: bool = False, safe: bool =
             if context is None:
                 browser = p.chromium.launch(
                     headless=not headed,
-                    args=_browser_launch_args(safe) + [f"--remote-debugging-port={debug_port}"])
+                    args=_browser_launch_args(safe) + ([f"--remote-debugging-port={debug_port}"] if debug_port else []))
                 context = browser.new_context(
                     user_agent=random.choice(USER_AGENTS),
                     # 视口默认 800×800 = DeepSeek 视觉原生分辨率（超范围会被官方压糊）；
@@ -2940,7 +2989,7 @@ def _vision_route(url: str, output_dir: Path, headed: bool = False, safe: bool =
                     **({"service_workers": "block"} if safe else {}),
                 )
             try:
-                _apply_stealth(context, stealth)
+                stealth_used = _apply_stealth(context, stealth)
                 context.add_init_script(MOUSE_TRACK_JS)
                 # 登录态注入（--cookies / --cookies-from-browser）：
                 # 豆包等登录墙站点带 cookie 开会，否则能打字但发送无反应
@@ -2980,6 +3029,21 @@ def _vision_route(url: str, output_dir: Path, headed: bool = False, safe: bool =
                 # 首屏带上 vision_capable/model：AI 进会话第一眼就知道自己能不能看图
                 # （此前只在 return 路径的 dict 里有，stdout 状态流里看不到）
                 init_extra = {"vision_capable": base["vision_capable"], "model": base["model"]}
+                # 登录兜底（--login-rescue）：扫码被风控拒发 session 时，自动从本机
+                # 浏览器接种目标域登录 cookie 并刷新（人肉在真浏览器登录，工具搬登录态）
+                rescue_note = ""
+                if login_rescue and startup_failed is None:
+                    rescue_note = _login_rescue(context, page, url)
+                    sys.stderr.write(f"[{rescue_note}]\n")
+                    if "已从" in rescue_note:
+                        # 接种后刷新过页面：补一轮渲染等待+回顶，坐标基准才准
+                        _wait_for_render(page, max_wait_sec=4.0)
+                        try:
+                            page.evaluate("window.scrollTo(0, 0)")
+                            page.wait_for_timeout(300)
+                        except Exception:
+                            pass
+                    init_extra["login_rescue"] = rescue_note
                 # 重定向告警：请求 URL 与最终 URL 不一致时告知 AI
                 if startup_failed is None and url and page.url != url and page.url != "about:blank":
                     init_extra["redirected_from"] = url
@@ -3033,6 +3097,15 @@ def _vision_route(url: str, output_dir: Path, headed: bool = False, safe: bool =
                     idle_limit = 600
                 else:
                     idle_limit = 120
+                # 启动横幅（stderr）：版本+关键参数一目了然——日志自证身份，
+                # 杜绝"老副本跑出诡异行为（如 --headed 仍 120s 断线）查半天"
+                sys.stderr.write(
+                    f"[vision] deepseek-web-search v{_skill_version()} | "
+                    f"stealth={stealth_used} profile={'开' if profile_dir else '关'} "
+                    f"headed={headed} idle看门狗={idle_limit}s captcha={captcha_mode} "
+                    f"调试口={'开' if debug_port else '关'} "
+                    f"login_rescue={'开' if login_rescue else '关'}\n"
+                )
                 # 截图节奏（shot_policy 指令可调）：默认动一次拍一张；空闲自动拍默认关
                 shot_every = 1
                 auto_interval_ms = 0
@@ -3536,6 +3609,7 @@ def auto_save_url(
     idle_timeout: Optional[int] = None,
     linger: bool = False,
     stealth: str = "full",
+    login_rescue: bool = False,
 ) -> Dict:
     """
     核心逻辑：
@@ -3660,7 +3734,8 @@ def auto_save_url(
                              captcha_mode=captcha_mode,
                              idle_timeout=idle_timeout,
                              linger=linger,
-                             stealth=stealth)
+                             stealth=stealth,
+                             login_rescue=login_rescue)
 
     # direct：只尝试直接下载直链媒体文件。
     if method == "direct":
@@ -4349,6 +4424,11 @@ def main(argv=None):
         default="full",
         help="浏览器伪装档位：full=全套（默认，playwright-stealth 深层指纹补丁，挡搜狗 antispider 级风控；库未装自动降级 basic 并告知）；basic=半套（项目自带 webdriver 抹除+UA/视口伪装）；off=关闭（对照调试用）",
     )
+    parser.add_argument(
+        "--login-rescue",
+        action="store_true",
+        help="登录兜底（配 --method vision/--profile 用）：打开页面后自动检查本机 chrome/edge/firefox，谁有所需站点的登录 cookie 就接种进来并刷新（治'扫码确认了但站点拒发 session'——人肉在自己平时浏览器登录目标站，工具把登录态搬进来）",
+    )
     parser.add_argument("--json", action="store_true", help="Output JSON")
     args = parser.parse_args(argv)
 
@@ -4414,6 +4494,7 @@ def main(argv=None):
                 idle_timeout=args.idle_timeout,
                 linger=args.linger,
                 stealth=args.stealth,
+                login_rescue=args.login_rescue,
             )
             # 自动选到 harvest/files 但颗粒无收：退回通用链再试一次（chain 自带优雅降级）。
             if auto_routed and data.get("count", 0) == 0 and not args.click_download:

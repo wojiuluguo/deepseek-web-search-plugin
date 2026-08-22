@@ -4,7 +4,7 @@ English | **[中文](README.zh-CN.md)**
 
 An [OpenClaw](https://github.com/openclaw) skill that gives DeepSeek real web search **and** an auto-save browser that downloads videos/audio/images/files from any webpage it opens — plus a vision mode for multimodal models (see a page, operate a page).
 
-> Current version **v1.17.0** (2026-08-22) · Author: user · [Changelog](#changelog)
+> Current version **v1.18.0** (2026-08-22) · Author: user · [Changelog](#changelog)
 
 <p align="center"><img src="assets/mascot.png" alt="deepseek-web-search mascot" width="220"></p>
 
@@ -197,6 +197,16 @@ deepseek-web-search-plugin/
 - App-funnel pages (only app-store redirects, no real files) honestly report `app_only: true` — the site itself offers no web download; this is not a script defect.
 
 ## Changelog
+
+### v1.18.0 (2026-08-22)
+
+Login rescue + self-identifying session logs (real-world: Douyin QR confirmed on phone but the web page still refused to log in):
+
+- **New `--login-rescue`**: hard risk-control sites (Douyin etc.) confirm the QR on your phone but refuse to issue a session to an automated browser (CDP detection; fingerprint stealth can't help). The fix: log in to the target site in your everyday browser, then start the session with `--login-rescue` — it walks local chrome→edge→firefox, grafts whichever has target-domain login cookies into the session, and reloads. Result is honestly reported via stderr and the first-state `login_rescue` field; with `--profile` the refreshed session persists.
+- **Local debug port auto-disabled for `--profile --headed` manual-login sessions**: the eval-watchdog DevTools port is one of the detection surfaces ByteDance-grade risk control looks at; it's now closed during login windows (the watchdog degrades to disabled — acceptable).
+- **Vision session startup banner**: first stderr line shows `version | stealth | profile | headed | idle-watchdog | captcha | debug-port | login_rescue` — logs now prove which build produced them, ending the "an old copy behaves weirdly (e.g. 120s disconnect even with --headed)" mystery.
+- Clarified the "120s no login detected" log: that's the idle watchdog counting AI-command gaps, unrelated to page login; new builds relax to 600s under --headed, so a 120s hit means an old copy was running.
+- Verified live: banner / honest rescue reporting / JSON field all pass.
 
 ### v1.17.0 (2026-08-22)
 

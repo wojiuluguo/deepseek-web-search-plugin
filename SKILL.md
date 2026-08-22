@@ -1,7 +1,7 @@
 ---
 name: deepseek-web-search
 description: DeepSeek 联网搜索技能。遇到实时信息、事实核查、新闻、价格、代码报错、未知名词或用户说“搜一下”时，必须使用本技能搜索并附来源。
-version: 1.17.0
+version: 1.18.0
 updated: 2026-08-22
 author: user
 license: MIT
@@ -64,6 +64,7 @@ tags: [web, search, deepseek, 联网, 搜索]
 | 抖音 `/note/` 图文帖报 `Unsupported URL` | 不用处理——v1.13.0 起自动转 harvest 收割图集原图（`note_auto_rerouted: true`）；原图仍空说明图集需登录，加 cookie 再试 |
 | 抖音长视频/直播只下到 1.3KB+封面（流没放行） | 站点按视频"看心情"放行，不是工具 bug；如实报告 + 建议 cookie 重试或换 `--method browser` |
 | 豆包等聊天站：能打字但发送无反应/输入被清空 | 未登录（无登录态时站点不渲染发送按钮，回车=弹登录框+清空输入框）：加 `--profile` 开持久会话，首次 `--headed` 人肉登录，之后免登录 |
+| 抖音等强风控站：扫码手机确认了，网页还是没登录 | 站点对自动化环境拒发登录 session（检测 CDP 痕迹，指纹伪装救不了）。正解：平时浏览器登录目标站 + 工具 `--login-rescue` 自动接种本机浏览器登录态（chrome→edge→firefox 自动找）；或 `--cookies-from-browser`/`--cookies` 指定源。`--profile --headed` 登录场景工具已自动关调试口减小检测面 |
 | SPA 图集只抓到几张可见图（懒加载抓不全/忽多忽少） | v1.13.1 迭代滚动收割 + v1.14.0 瞬时失败跨轮重试 + v1.16.0 每轮收割前等 in-flight 图片加载完（img.complete）；仍不全时换 `--method harvest` 显式指定再试 |
 
 ## Token 经济（DeepSeek 上下文管理）
@@ -318,6 +319,8 @@ python "{baseDir}/scripts/auto_save_browser.py" --url "https://v.douyin.com/xxx"
 cookie 生效路线（v1.14.0 起）：yt-dlp（`cookiefile`/`cookiesfrombrowser`）、浏览器/cache、harvest、vision 视觉会话、note 图集转路全部吃到（`--cookies-from-browser` 现在借道 yt-dlp 提取器读本机浏览器登录态真正注入浏览器路线，此前只在 yt-dlp 路线生效）；files/text 文件线不吃 cookie，登录文件站改用 `--profile`。两个参数同时给时文件优先。cookie 过期或域不匹配会如实报错，不静默失败。`own_search.py download` 同名参数透传。
 
 **持久化登录（v1.14.0，`--profile [目录]`）**：无头浏览器默认每次都是"全新访客"，登录墙站点每次都要重新登录。加 `--profile` 后浏览器使用固定用户目录（默认 `downloads/browser_profile/`），cookie/缓存/登录态跨会话保留，和真实浏览器一模一样。首次登录：`--method vision --profile --headed` 弹出窗口人肉扫码；之后 `--profile` 无头跑即可免登录。注意：目录里存的是登录 cookie（已 gitignore，别拷给别人），同一目录同时只能开一个会话。
+
+**登录兜底（v1.18.0，`--login-rescue`）**：抖音等强风控站对自动化环境扫码会"手机确认成功但网页拒发 session"（检测 CDP 痕迹）。此时：先在自己平时的浏览器里登录目标站，再给工具加 `--login-rescue` 开会——自动遍历本机 chrome→edge→firefox，谁有目标域登录 cookie 就接种进当前会话并刷新页面（结果在 stderr 与首屏 `login_rescue` 字段如实报告；接种成功后新刷的 session 会随 `--profile` 持久化）。`--profile --headed` 人肉登录场景下工具自动关闭本地调试口，减小字节级风控的检测面。
 
 不指定 `--method` 时自动选路：视频站/媒体直链→chain（原路不变）；图片站/音乐站/`--media-type` 单选的照片页音频页→harvest 专用线（DOM 收割+页面上下文下载，快），颗粒无收自动退回 chain 再试；文件（zip/pdf/docx 等直链，或 `--media-type file` / 关键词含"文件/压缩包/文档/pdf"）→files 专用线。显式指定 `--method` 时完全按指定的走。**视频站域名一票否决**：抖音/B站等"视频流+音频流分离"的站点无论 `--media-type` 怎么单选都走视频路（yt-dlp 双流合并），页面里的音频是视频伴音，绝不能拆开只抓半条流；纯图片/纯音频收割时也跳过 m4s/ts 分离流分段防残件。
 
