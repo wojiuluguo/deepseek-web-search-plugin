@@ -4,7 +4,7 @@ English | **[中文](README.zh-CN.md)**
 
 An [OpenClaw](https://github.com/openclaw) skill that gives DeepSeek real web search **and** an auto-save browser that downloads videos/audio/images/files from any webpage it opens — plus a vision mode for multimodal models (see a page, operate a page).
 
-> Current version **v1.16.0** (2026-08-22) · Author: user · [Changelog](#changelog)
+> Current version **v1.17.0** (2026-08-22) · Author: user · [Changelog](#changelog)
 
 <p align="center"><img src="assets/mascot.png" alt="deepseek-web-search mascot" width="220"></p>
 
@@ -197,6 +197,16 @@ deepseek-web-search-plugin/
 - App-funnel pages (only app-store redirects, no real files) honestly report `app_only: true` — the site itself offers no web download; this is not a script defect.
 
 ## Changelog
+
+### v1.17.0 (2026-08-22)
+
+Three-tier browser stealth, full by default:
+
+- **New `--stealth full|basic|off` (default full)**: playwright-stealth deep-fingerprint patches (plugins/WebGL/UA-Data/sec-ch-ua/hairline, 20+ items) on top of the existing webdriver-erase + UA/viewport/locale disguise — headless fingerprint now closely resembles a real user's browser; `basic` keeps the old half-set; `off` for control testing.
+- **Applied everywhere**: search browser + all download/vision routes share `_apply_stealth`; auto-degrades to basic with an stderr notice when the library is missing.
+- New dependency `playwright-stealth` added to requirements.txt and the installer.
+- **Verified live**: off → plugins=0 (bare), basic → plugins=5 (fake), full → plugins=3 + brands without HeadlessChrome (real-looking); Bing search regression passes.
+- **Known limitation (stated honestly)**: Sogou antispider is IP/behavior-level risk control that fingerprint stealth cannot pass — switch engines or warm a `--profile` login (documented in SKILL.md).
 
 ### v1.16.0 (2026-08-22)
 

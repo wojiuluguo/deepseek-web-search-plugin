@@ -1,7 +1,7 @@
 ---
 name: deepseek-web-search
 description: DeepSeek 联网搜索技能。遇到实时信息、事实核查、新闻、价格、代码报错、未知名词或用户说“搜一下”时，必须使用本技能搜索并附来源。
-version: 1.16.0
+version: 1.17.0
 updated: 2026-08-22
 author: user
 license: MIT
@@ -29,6 +29,7 @@ tags: [web, search, deepseek, 联网, 搜索]
 | 抓文章正文/小说章节 | `auto_save_browser.py --url 文章或目录页 --media-type text`（text 专用线：单页正文/小说目录逐章合并成 txt/txt直链直下，`--max-chapters` 控制上限） |
 | 校验抓包产物/分正片垃圾/查虚标 | `verify_capture.py --dir <产物目录>` |
 | 网站可疑/怕挖矿病毒/保护本机 | 任何命令加 `--safe`（安全模式） |
+| 浏览器被识别成机器人/风控拦截 | 默认已全套伪装（`--stealth full`）；仍被拦的强风控站（搜狗 antispider）属 IP/行为层风控，换引擎或加 `--profile` 养登录态 |
 | 登录一次以后免登录（豆包/抖音/B站网页版等） | 任意命令加 `--profile`：固定浏览器用户目录，登录态跨会话保留；首次配 `--method vision --profile --headed` 人肉登录一次 |
 | 自己的本地索引 | `own_search.py search` |
 | 看页面长什么样（多模态模型专用） | 任意命令加 `--screenshot`：整页截图(PNG)+屏幕信息喂给视觉模型 |
@@ -51,6 +52,7 @@ tags: [web, search, deepseek, 联网, 搜索]
 | `Playwright 未安装` | 轻量版 `search.py` 兜底；或跑 `install_dependencies.py` |
 | 浏览器启动失败/超时 | 换 `search.py`（纯 HTTP） |
 | 某引擎 `no results`/`unsupported engine` | 正常，多引擎时其他引擎已兜住；单引擎失败自动跳过 |
+| 搜狗甩 antispider 验证页 | 搜狗是 IP/行为层风控（指纹伪装救不了）：换 `--engines baidu,bing,so360`；或 `--profile` 养登录态后重试 |
 | `all methods failed`（媒体抓取） | 换 `--method chain` 再试一次；还不行如实报告 |
 | 下载输出带 `crash: page open failed`/`browser error`（页面打不开/超时） | 已自动降级：chain 会继续试下一种方式；换 `--method ytdlp` 或稍后重试 |
 | `yt-dlp not installed` | 改用 `--method browser` 或跑安装脚本 |
@@ -154,11 +156,21 @@ python -c "import playwright, yt_dlp; print('依赖OK')"
 
 3. 安全边界（必须遵守）：
 
-- 只安装 PyPI 官方包：`playwright`、`yt-dlp`；
+- 只安装 PyPI 官方包：`playwright`、`yt-dlp`、`playwright-stealth`（全套伪装用，未装时自动降级半套并告知）；
 - 只运行 Playwright 官方 Chromium 安装；
 - 不修改 Windows 防火墙、Defender、系统安全设置；
 - 不下载/执行来路不明的脚本；
 - ffmpeg 只是可选增强，缺失时不阻塞使用。
+
+## 浏览器伪装（--stealth，v1.17.0 默认全套）
+
+| 档位 | 内容 | 场景 |
+|---|---|---|
+| `full`（默认） | playwright-stealth 深层指纹补丁：plugins/WebGL/UA-Data/sec-ch-ua/hairline 等 20+ 项，配合自带 UA/视口/locale 伪装 | 日常默认；库未装自动降级 basic 并 stderr 告知 |
+| `basic` | 半套：项目自带 webdriver 抹除 + UA/视口随机 + zh-CN locale | 轻量场景/对照 |
+| `off` | 完全裸奔 | 调试对照 |
+
+生效范围：搜索浏览器（search_browser）+ 全部下载/视觉路线（browser/cache/harvest/files/text/vision/screenshot）。已知限制：搜狗 antispider 属 IP/行为层风控，指纹伪装无法通过（换引擎或 `--profile` 养登录态）。
 
 ## 搜索方法（按优先级）
 

@@ -458,6 +458,44 @@ def _browser_launch_args(safe: bool) -> List[str]:
     return args
 
 
+# ---------- 浏览器伪装（--stealth full|basic|off，v1.17.0 默认 full） ----------
+# basic（半套）= 项目自带 STEALTH_JS：抹 webdriver + UA/视口/locale 伪装。
+#   挡得住必应/百度级风控，挡不住搜狗 antispider（实测无头会话被甩验证页）。
+# full（全套，默认）= playwright-stealth 库：再补 plugins/WebGL/UA-Data/
+#   sec-ch-ua/hairline 等 20+ 项深层指纹补丁，中等风控站通过率显著提升。
+#   库未安装时自动降级 basic 并 stderr 告知（不硬崩）；off = 完全裸奔（对照调试用）。
+
+
+def _apply_stealth(context, mode: str) -> str:
+    """对浏览器上下文应用伪装。返回实际生效的档位（可能降级）。"""
+    mode = (mode or "full").lower()
+    if mode == "off":
+        return "off"
+    if mode == "basic":
+        context.add_init_script(STEALTH_JS)
+        return "basic"
+    # full：优先 playwright-stealth，未安装自动降级 basic
+    try:
+        from playwright_stealth import Stealth
+        # navigator_languages 用 zh-CN 与项目一致；UA 不覆盖（保留我们自己的 UA 池/
+        # --profile 固定 UA，避免伪装库 UA 与 context UA 打架反而成指纹）
+        st = Stealth(navigator_languages_override=("zh-CN", "zh"))
+        st.apply_stealth_sync(context)
+        return "full"
+    except ImportError:
+        sys.stderr.write("[stealth] playwright-stealth 未安装，full 降级 basic"
+                         "（安装：python -m pip install playwright-stealth）\n")
+        context.add_init_script(STEALTH_JS)
+        return "basic(degraded)"
+    except Exception as exc:
+        sys.stderr.write(f"[stealth] full 应用失败({exc})，退回 basic\n")
+        try:
+            context.add_init_script(STEALTH_JS)
+        except Exception:
+            pass
+        return "basic(fallback)"
+
+
 def _is_junk_resource(url: str, content_type: str, size: int, size_strict: bool = True) -> bool:
     """判定垃圾资源。size_strict=False 时跳过尺寸阈值（图集收割场景：
     用户点名要图，几十 KB 的正片图不是垃圾；只按扩展名/URL 关键词滤真图标）。"""
@@ -2303,7 +2341,8 @@ def _shot_viewport(page, output_dir: Path, prefix: str = "screen") -> Optional[s
         return None
 
 
-def _screenshot_standalone(url: str, output_dir: Path, headed: bool = False, safe: bool = False) -> Dict:
+def _screenshot_standalone(url: str, output_dir: Path, headed: bool = False, safe: bool = False,
+                           stealth: str = "full") -> Dict:
     """独立截图（--screenshot 标志，配任意模式）：打开页面→渲染等待→懒加载→整页/分段截图。
     不干扰原模式逻辑，截图结果合并进 JSON。"""
     result: Dict = {"screenshots": [], "screen": {}}
@@ -2323,7 +2362,8 @@ def _screenshot_standalone(url: str, output_dir: Path, headed: bool = False, saf
                     ignore_https_errors=True,
                     **({"service_workers": "block"} if safe else {}),
                 )
-                context.add_init_script(STEALTH_JS + MOUSE_TRACK_JS)
+                _apply_stealth(context, stealth)
+                context.add_init_script(MOUSE_TRACK_JS)
                 page = context.new_page()
                 if safe:
                     _setup_safe_mode(context, page)
@@ -2762,7 +2802,8 @@ def _vision_route(url: str, output_dir: Path, headed: bool = False, safe: bool =
                   profile_dir: Optional[Path] = None,
                   captcha_mode: str = "off",
                   idle_timeout: Optional[int] = None,
-                  linger: bool = False) -> Dict:
+                  linger: bool = False,
+                  stealth: str = "full") -> Dict:
     """视觉会话模式（--method vision）：给多模态模型的"眼睛+手"。
 
     协议（stdin/stdout 各一行一个 JSON，AI Agent 驱动）：
@@ -2899,7 +2940,8 @@ def _vision_route(url: str, output_dir: Path, headed: bool = False, safe: bool =
                     **({"service_workers": "block"} if safe else {}),
                 )
             try:
-                context.add_init_script(STEALTH_JS + MOUSE_TRACK_JS)
+                _apply_stealth(context, stealth)
+                context.add_init_script(MOUSE_TRACK_JS)
                 # 登录态注入（--cookies / --cookies-from-browser）：
                 # 豆包等登录墙站点带 cookie 开会，否则能打字但发送无反应
                 if cookie_file or cookies_from_browser:
@@ -3172,7 +3214,7 @@ def _vision_route(url: str, output_dir: Path, headed: bool = False, safe: bool =
 
 def _files_route(
     url: str, output_dir: Path, headed: bool = False, safe: bool = False,
-    zip_bundle: bool = False, click_download: bool = False,
+    zip_bundle: bool = False, click_download: bool = False, stealth: str = "full",
 ) -> Dict:
     """文件专用路线：
     1. URL 是文件直链（zip/pdf 等结尾）→ 流式直下（大文件不吃内存）；
@@ -3218,7 +3260,7 @@ def _files_route(
                         ignore_https_errors=True,
                         **({"service_workers": "block"} if safe else {}),
                     )
-                    context.add_init_script(STEALTH_JS)
+                    _apply_stealth(context, stealth)
                     page = context.new_page()
                     blocked = _setup_safe_mode(context, page) if safe else {}
                     page.goto(url, wait_until="domcontentloaded", timeout=30000)
@@ -3341,7 +3383,7 @@ def _extract_body_text(page) -> tuple:
 
 def _text_route(
     url: str, output_dir: Path, headed: bool = False, safe: bool = False,
-    max_chapters: int = 100, allow_chapters: bool = True,
+    max_chapters: int = 100, allow_chapters: bool = True, stealth: str = "full",
 ) -> Dict:
     """文本专用线：
     1. txt/md/csv 直链 → 委托 files 流式直下（文件本体原样保存）；
@@ -3378,7 +3420,7 @@ def _text_route(
                         extra_http_headers={"Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"},
                         **({"service_workers": "block"} if safe else {}),
                     )
-                    context.add_init_script(STEALTH_JS)
+                    _apply_stealth(context, stealth)
                     page = context.new_page()
                     blocked = _setup_safe_mode(context, page) if safe else {}
                     page.goto(url, wait_until="domcontentloaded", timeout=30000)
@@ -3493,6 +3535,7 @@ def auto_save_url(
     captcha_mode: str = "off",
     idle_timeout: Optional[int] = None,
     linger: bool = False,
+    stealth: str = "full",
 ) -> Dict:
     """
     核心逻辑：
@@ -3524,7 +3567,8 @@ def auto_save_url(
                               auto_wait, save_junk, keep_segments, media_types, safe,
                               cookie_file=cookie_file,
                               cookies_from_browser=cookies_from_browser,
-                              profile_dir=profile_dir)
+                              profile_dir=profile_dir,
+                              stealth=stealth)
             if r.get("saved"):
                 r["method"] = f"{method}->harvest(note)"
                 r["note_auto_rerouted"] = True
@@ -3556,13 +3600,15 @@ def auto_save_url(
                                            auto_wait, save_junk, keep_segments, "image,audio", safe,
                                            cookie_file=cookie_file,
                                            cookies_from_browser=cookies_from_browser,
-                                           profile_dir=profile_dir)
+                                           profile_dir=profile_dir,
+                                           stealth=stealth)
                 else:
                     result = auto_save_url(url, output_dir, wait_seconds, m, headed, max_wait,
                                            auto_wait, save_junk, keep_segments, media_types, safe,
                                            cookie_file=cookie_file,
                                            cookies_from_browser=cookies_from_browser,
-                                           profile_dir=profile_dir)
+                                           profile_dir=profile_dir,
+                                           stealth=stealth)
             except Exception as exc:
                 # 某一环崩了（页面打不开/playwright 缺失等）不让 chain 整体死掉，继续试下一种
                 result = {"saved": [], "count": 0, "method": m, "yt_dlp_error": f"crash: {exc}"}
@@ -3599,7 +3645,8 @@ def auto_save_url(
     # files：文件专用路线（压缩包/文档/表格/文本等，直链直下、页面批量下、可打包zip）
     if method == "files":
         return _files_route(url, output_dir, headed=headed, safe=safe,
-                            zip_bundle=zip_bundle, click_download=click_download)
+                            zip_bundle=zip_bundle, click_download=click_download,
+                            stealth=stealth)
 
     # vision：视觉会话模式（多模态模型的"眼睛+手"，stdin/stdout JSON 协议驱动）
     if method == "vision":
@@ -3612,7 +3659,8 @@ def auto_save_url(
                              profile_dir=profile_dir,
                              captcha_mode=captcha_mode,
                              idle_timeout=idle_timeout,
-                             linger=linger)
+                             linger=linger,
+                             stealth=stealth)
 
     # direct：只尝试直接下载直链媒体文件。
     if method == "direct":
@@ -3627,7 +3675,8 @@ def auto_save_url(
     # text：文本专用线（txt直链直下 / 小说目录逐章合并 / 单页正文提取）。
     if method == "text":
         return _text_route(url, output_dir, headed=headed, safe=safe,
-                           max_chapters=max_chapters, allow_chapters=allow_chapters)
+                           max_chapters=max_chapters, allow_chapters=allow_chapters,
+                           stealth=stealth)
 
     # harvest：只走 DOM/元数据/JSON 收割 + 页面上下文下载，快（无长等待），适合照片/音频。
     if method == "harvest":
@@ -3676,7 +3725,7 @@ def auto_save_url(
                                 extra_http_headers={"Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"},
                                 **({"service_workers": "block"} if safe else {}),
                             )
-                        context.add_init_script(STEALTH_JS)
+                        _apply_stealth(context, stealth)
                         # 登录态注入：抖音 note 图集原图等登录墙资源，带 cookie 才放行。
                         # cookies.txt 与本机浏览器登录态（--cookies-from-browser，借道 yt-dlp
                         # 提取）都支持——此前浏览器参数在这条路线被静默无视
@@ -3833,7 +3882,7 @@ def auto_save_url(
                     ignore_https_errors=True,  # 与 files/vision 路线同口径：自签证书站点也能开
                     **({"service_workers": "block"} if safe else {}),
                 )
-            context.add_init_script(STEALTH_JS)
+            _apply_stealth(context, stealth)
             # 登录态注入：抖音/B站登录墙站点，带 cookie 浏览器才放行视频流。
             # cookies.txt 与本机浏览器登录态（--cookies-from-browser）都支持
             if cookie_file or cookies_from_browser:
@@ -4294,6 +4343,12 @@ def main(argv=None):
         action="store_true",
         help="视觉会话结束后不立即关浏览器：--headed 窗口保留给人看完手动关（上限1h）；无头保留 30s 自动退。AI 脚本崩了浏览器现场不再消失",
     )
+    parser.add_argument(
+        "--stealth",
+        choices=["full", "basic", "off"],
+        default="full",
+        help="浏览器伪装档位：full=全套（默认，playwright-stealth 深层指纹补丁，挡搜狗 antispider 级风控；库未装自动降级 basic 并告知）；basic=半套（项目自带 webdriver 抹除+UA/视口伪装）；off=关闭（对照调试用）",
+    )
     parser.add_argument("--json", action="store_true", help="Output JSON")
     args = parser.parse_args(argv)
 
@@ -4358,6 +4413,7 @@ def main(argv=None):
                 captcha_mode=args.captcha_mode,
                 idle_timeout=args.idle_timeout,
                 linger=args.linger,
+                stealth=args.stealth,
             )
             # 自动选到 harvest/files 但颗粒无收：退回通用链再试一次（chain 自带优雅降级）。
             if auto_routed and data.get("count", 0) == 0 and not args.click_download:
@@ -4379,6 +4435,7 @@ def main(argv=None):
                         cookie_file=args.cookies,
                         cookies_from_browser=args.cookies_from_browser,
                         profile_dir=profile_dir,
+                        stealth=args.stealth,
                     )
                     data["method_fallback"] = f"{method}→chain"
                 except Exception:
@@ -4435,6 +4492,7 @@ def main(argv=None):
                     cookie_file=args.cookies,
                     cookies_from_browser=args.cookies_from_browser,
                     profile_dir=profile_dir,
+                    stealth=args.stealth,
                 )
             except Exception as exc:
                 data = {
@@ -4473,6 +4531,7 @@ def main(argv=None):
                         zip_bundle=args.zip,
                         max_chapters=args.max_chapters,
                         profile_dir=profile_dir,
+                        stealth=args.stealth,
                     )
                     if retry.get("count", 0) > 0:
                         retry["mode"] = "query"
@@ -4493,7 +4552,8 @@ def main(argv=None):
         shot_url = data.get("picked_url") or data.get("source_url") or args.url
         if shot_url:
             print(f"[截图] 打开页面截图（给多模态模型看）：{shot_url[:100]}", file=sys.stderr)
-            shot = _screenshot_standalone(shot_url, output_dir, headed=args.headed, safe=args.safe)
+            shot = _screenshot_standalone(shot_url, output_dir, headed=args.headed,
+                                          safe=args.safe, stealth=args.stealth)
             data["screenshots"] = shot.get("screenshots", [])
             data["screen"] = shot.get("screen", {})
             if shot.get("error"):

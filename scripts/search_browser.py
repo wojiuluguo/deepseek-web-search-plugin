@@ -32,6 +32,7 @@ sys.path.insert(0, str(_P(__file__).resolve().parent))
 try:
     from auto_save_browser import _setup_safe_mode as _SETUP_SAFE_MODE
     from auto_save_browser import _browser_launch_args as _BROWSER_LAUNCH_ARGS
+    from auto_save_browser import _apply_stealth as _APPLY_STEALTH
 except ImportError:  # 单文件挪走用时退化为普通模式
     def _SETUP_SAFE_MODE(context, page):  # type: ignore
         return {}
@@ -43,6 +44,11 @@ except ImportError:  # 单文件挪走用时退化为普通模式
         if not safe:
             args += ["--disable-features=IsolateOrigins,site-per-process", "--no-sandbox"]
         return args
+
+    def _APPLY_STEALTH(context, mode):  # type: ignore
+        # 兜底：单文件挪走时退回半套伪装（STEALTH_JS 上面自带）
+        context.add_init_script(STEALTH_JS)
+        return "basic"
 
 try:
     from playwright.sync_api import sync_playwright
@@ -612,7 +618,8 @@ def _parse_proxy(proxy: str):
     return info
 
 
-def run_search(query: str, max_results: int, engines: List[str], proxy: str = "", safe: bool = False) -> Dict:
+def run_search(query: str, max_results: int, engines: List[str], proxy: str = "", safe: bool = False,
+               stealth: str = "full") -> Dict:
     if not _HAS_PLAYWRIGHT:
         hint = "playwright 未安装: pip install playwright && python -m playwright install chromium"
         return {"query": query, "results": [], "engine_errors": {"playwright": hint}, "browser": "unavailable"}
@@ -644,7 +651,7 @@ def run_search(query: str, max_results: int, engines: List[str], proxy: str = ""
             if proxy_info:
                 context_kwargs["proxy"] = proxy_info
             context = browser.new_context(**context_kwargs)
-            context.add_init_script(STEALTH_JS)
+            _APPLY_STEALTH(context, stealth)
             page = context.new_page()
             # 安全模式：请求拦截 + 弹窗全关（复用 auto_save_browser 的安全基建）
             safe_blocked = _SETUP_SAFE_MODE(context, page) if safe else {}
@@ -754,6 +761,12 @@ def main(argv=None):
         action="store_true",
         help="安全模式：恢复浏览器进程沙箱+站点隔离、拦挖矿/危险下载/弹窗（搜索可疑内容/打开陌生站点时用）",
     )
+    parser.add_argument(
+        "--stealth",
+        choices=["full", "basic", "off"],
+        default="full",
+        help="浏览器伪装档位：full=全套（默认，playwright-stealth 深层指纹补丁，显著提升搜狗等风控站通过率）；basic=半套（自带伪装）；off=关闭",
+    )
     args = parser.parse_args(argv)
 
     query = (args.query or args.query_pos or "").strip()
@@ -774,7 +787,8 @@ def main(argv=None):
         query = f'"{query.strip()}"'
 
     engines = _resolve_engines(args.engines, args.category, query)
-    data = run_search(query, args.max_results, engines, proxy=args.proxy, safe=args.safe)
+    data = run_search(query, args.max_results, engines, proxy=args.proxy, safe=args.safe,
+                      stealth=args.stealth)
 
     data["results"] = _filter_results(data.get("results", []), args.ad_filter)
     if args.site:

@@ -21,6 +21,7 @@ import sys
 REQUIRED_PACKAGES = {
     "playwright": "playwright>=1.40.0",
     "yt_dlp": "yt-dlp>=2024.0.0",
+    "playwright_stealth": "playwright-stealth>=1.0.0",  # 全套伪装（--stealth full 默认）
 }
 
 

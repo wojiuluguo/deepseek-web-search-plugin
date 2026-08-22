@@ -4,6 +4,7 @@
 
 playwright>=1.40.0
 yt-dlp>=2024.0.0
+playwright-stealth>=1.0.0
 
 # 可选 API 源（只需要环境变量，不涉及 pip 包）：
 #   TAVILY_API_KEY

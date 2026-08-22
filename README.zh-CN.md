@@ -4,7 +4,7 @@
 
 OpenClaw Skill：让 DeepSeek 模型能搜索、会搜索、并且"该搜就搜"，还能自动下载网页里的视频/音频/图片/文件，多模态模型还能"看页面+操作页面"。
 
-> 当前版本 **v1.16.0**（2026-08-22）· 作者：user · [更新记录](#更新记录)
+> 当前版本 **v1.17.0**（2026-08-22）· 作者：user · [更新记录](#更新记录)
 
 <p align="center"><img src="assets/mascot.png" alt="deepseek-web-search 吉祥物" width="220"></p>
 
@@ -199,6 +199,16 @@ deepseek-web-search-plugin/
 - APP 引流陷阱页（只跳应用商店无真文件）会如实报 `app_only: true`，这是站点本身不提供网页端下载，非脚本缺陷。
 
 ## 更新记录
+
+### v1.17.0（2026-08-22）
+
+浏览器伪装三档可选，默认全套：
+
+- **新增 `--stealth full|basic|off`（默认 full 全套）**：接入 playwright-stealth 深层指纹补丁（plugins/WebGL/UA-Data/sec-ch-ua/hairline 等 20+ 项），配合原有 webdriver 抹除 + UA/视口/locale 伪装——无头浏览器指纹显著接近真人浏览器；`basic` 保留原半套；`off` 裸奔对照
+- **全线接入**：搜索浏览器（search_browser）+ 全部下载/视觉路线（browser/cache/harvest/files/text/vision/screenshot）统一走 `_apply_stealth`；库未安装自动降级 basic 并 stderr 告知，不硬崩
+- 新依赖 `playwright-stealth` 已进 requirements.txt 与一键安装脚本
+- **实测验证**：off 档 plugins=0（裸奔）/ basic 档 plugins=5（假插件）/ full 档 plugins=3 + brands 无 HeadlessChrome（真实指纹）；必应搜索回归正常
+- **已知限制（如实声明）**：搜狗 antispider 属 IP/行为层风控，指纹伪装无法通过——换引擎或 `--profile` 养登录态（已写进 SKILL.md 错误自愈表）
 
 ### v1.16.0（2026-08-22）
 
