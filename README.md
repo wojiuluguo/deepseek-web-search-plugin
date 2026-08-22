@@ -4,7 +4,7 @@ English | **[中文](README.zh-CN.md)**
 
 An [OpenClaw](https://github.com/openclaw) skill that gives DeepSeek real web search **and** an auto-save browser that downloads videos/audio/images/files from any webpage it opens — plus a vision mode for multimodal models (see a page, operate a page).
 
-> Current version **v1.19.1** (2026-08-22) · Author: user (Douyin ID: 94636651553) · [Changelog](#changelog)
+> Current version **v1.20.0** (2026-08-22) · Author: user (Douyin ID: 94636651553) · [Changelog](#changelog)
 
 <p align="center"><img src="assets/mascot.png" alt="deepseek-web-search mascot" width="220"></p>
 
@@ -197,6 +197,15 @@ deepseek-web-search-plugin/
 - App-funnel pages (only app-store redirects, no real files) honestly report `app_only: true` — the site itself offers no web download; this is not a script defect.
 
 ## Changelog
+
+### v1.20.0 (2026-08-22)
+
+Three-state virtual cursor (user feedback: a fixed arrow isn't like a real mouse):
+
+- **The cursor now morphs like a real one**: hovering links/buttons → **pointing hand**; hovering input fields → **I-beam text cursor**; elsewhere → **arrow**. Switches automatically by inspecting the element under the pointer via CSS cursor (pointer/grab→hand, text or input/textarea/contenteditable→I-beam, else arrow).
+- From a screenshot the AI now knows not just "where the mouse is" but "is the hovered thing **clickable (hand) / typeable (I-beam)**".
+- All three shapes white-filled with black outline, hotspot-aligned (arrow/hand tips and I-beam crossbar center = the real mouse coordinate).
+- Verified live: link on example.com = HAND, blank area = ARROW, Baidu input = TEXT — all pass.
 
 ### v1.19.1 (2026-08-22)
 

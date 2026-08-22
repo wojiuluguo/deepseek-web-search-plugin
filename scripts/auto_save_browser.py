@@ -2257,26 +2257,58 @@ window.__mx = 0; window.__my = 0;
 document.addEventListener('mousemove', e => { window.__mx = e.clientX; window.__my = e.clientY; });
 """
 
-# 虚拟鼠标指针（v1.19.0，视觉会话专用）：无头截图不渲染系统光标，AI 只能靠
-# screen.mouse 的数字坐标猜——这个覆盖层画一个放大的白色箭头（黑描边，任何
+# 虚拟鼠标指针（v1.20.0，视觉会话专用）：无头截图不渲染系统光标，AI 只能靠
+# screen.mouse 的数字坐标猜——这个覆盖层画一个放大的指针（白底黑描边，任何
 # 底色都看得清），实时跟随 mousemove，截图里直接可见"鼠标在哪"。
+# v1.20.0 三形态（跟真鼠标一样会变形）：每步检测鼠标下元素的 CSS cursor——
+#   箭头(默认) / 手指(链接按钮等 pointer) / I 型光标(输入框 text)，
+# AI 看截图就知道"现在悬停的是什么东西"（手指=可点、I光标=可输入）。
 # pointer-events:none 不挡点击；挂在 documentElement 上（页面清 body 也不丢）；
 # CDP 驱动的 mouse.move/click 同样触发 mousemove，所以 AI 每次操作后指针都会跟着走。
 CURSOR_OVERLAY_JS = """
 (() => {
     if (window.__aiCursor) return;
+    const STROKE = 'stroke="#000000" stroke-linejoin="round"';
+    const SHAPES = {
+        // 经典箭头（热点在左上尖角）
+        arrow: { svg: '<path d="M4 2 L4 20 L8.5 15.5 L11.5 22 L14 20.8 L11 14.5 L17 14 Z" fill="#ffffff" ' + STROKE + ' stroke-width="1.4"/>', dx: -2, dy: -2 },
+        // 指向手（热点在食指指尖）
+        hand:  { svg: '<path d="M9.2 1.6 a1.5 1.5 0 0 1 3 0 V10 h0.8 a3.8 3.8 0 0 1 3.8 3.8 v2.8 c0 4-2.4 6-5.8 6 -3.2 0-5-1.7-5.9-4.5 L3.9 13.3 a1.6 1.6 0 0 1 2.9-1.3 L8.2 14 l1-1.5 Z" fill="#ffffff" ' + STROKE + ' stroke-width="1.3"/>', dx: -4, dy: -2 },
+        // I 型文本光标（白粗描底+黑细线，热点在横杆中心）
+        text:  { svg: '<path d="M7 2.5 H17 M12 2.5 V21.5 M7 21.5 H17" fill="none" stroke="#ffffff" stroke-width="3"/><path d="M7 2.5 H17 M12 2.5 V21.5 M7 21.5 H17" fill="none" stroke="#000000" stroke-width="1.3"/>', dx: -17, dy: -17 },
+    };
     const el = document.createElement('div');
     el.id = '__ai_cursor__';
     el.style.cssText = 'position:fixed;left:0;top:0;z-index:2147483647;'
         + 'pointer-events:none;width:34px;height:34px;';
-    el.innerHTML = '<svg width="34" height="34" viewBox="0 0 24 24" '
-        + 'style="filter:drop-shadow(0 1px 3px rgba(0,0,0,.9))">'
-        + '<path d="M4 2 L4 20 L8.5 15.5 L11.5 22 L14 20.8 L11 14.5 L17 14 Z" '
-        + 'fill="#ffffff" stroke="#000000" stroke-width="1.4" stroke-linejoin="round"/></svg>';
-    const place = (x, y) => { el.style.transform = 'translate(' + (x - 2) + 'px,' + (y - 2) + 'px)'; };
-    const onMove = e => { place(e.clientX, e.clientY); };
+    let curShape = '';
+    const place = (x, y) => { el.style.transform = 'translate(' + (x + el.__dx) + 'px,' + (y + el.__dy) + 'px)'; };
+    const setShape = (name) => {
+        if (name === curShape || !SHAPES[name]) return;
+        curShape = name;
+        el.innerHTML = '<svg width="34" height="34" viewBox="0 0 24 24" '
+            + 'style="filter:drop-shadow(0 1px 3px rgba(0,0,0,.9))">' + SHAPES[name].svg + '</svg>';
+        el.__dx = SHAPES[name].dx; el.__dy = SHAPES[name].dy;
+    };
+    // 判定形态：优先元素自己的 CSS cursor；auto/default 时按可编辑性推断（同浏览器行为）
+    const shape_for = (node) => {
+        if (!node || node.nodeType !== 1) return 'arrow';
+        const c = getComputedStyle(node).cursor;
+        if (c === 'pointer' || c === 'grab' || c === 'grabbing' || c === 'move') return 'hand';
+        if (c === 'text') return 'text';
+        if (c === 'auto' || c === '' || c === 'default') {
+            const t = node.tagName;
+            if (t === 'INPUT' || t === 'TEXTAREA' || node.isContentEditable) return 'text';
+        }
+        return 'arrow';
+    };
+    const onMove = e => {
+        setShape(shape_for(document.elementFromPoint(e.clientX, e.clientY)));
+        place(e.clientX, e.clientY);
+    };
     const boot = () => {
         document.documentElement.appendChild(el);
+        setShape('arrow');
         document.addEventListener('mousemove', onMove, true);
         place(window.__mx || 0, window.__my || 0);
     };
