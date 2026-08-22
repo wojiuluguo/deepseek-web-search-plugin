@@ -4,7 +4,7 @@ English | **[中文](README.zh-CN.md)**
 
 An [OpenClaw](https://github.com/openclaw) skill that gives DeepSeek real web search **and** an auto-save browser that downloads videos/audio/images/files from any webpage it opens — plus a vision mode for multimodal models (see a page, operate a page).
 
-> Current version **v1.18.0** (2026-08-22) · Author: user · [Changelog](#changelog)
+> Current version **v1.19.0** (2026-08-22) · Author: user · [Changelog](#changelog)
 
 <p align="center"><img src="assets/mascot.png" alt="deepseek-web-search mascot" width="220"></p>
 
@@ -197,6 +197,14 @@ deepseek-web-search-plugin/
 - App-funnel pages (only app-store redirects, no real files) honestly report `app_only: true` — the site itself offers no web download; this is not a script defect.
 
 ## Changelog
+
+### v1.19.0 (2026-08-22)
+
+Virtual mouse cursor for vision sessions:
+
+- **Virtual mouse cursor (built into vision sessions, no flag needed)**: headless screenshots don't render the OS cursor — the AI previously had to guess "where is the mouse" from `screen.mouse` numbers. Sessions now auto-inject an **enlarged white arrow cursor (34px, black outline, visible on any background)** that follows the mouse in real time (CDP-driven move/click/drag all trigger it). The big white arrow in screenshots IS the current mouse position, consistent with screen.mouse.
+- Implementation: injected overlay (pointer-events:none so it never blocks clicks, attached to documentElement so body-clearing pages can't drop it, waits for DOMContentLoaded); enabled only in vision sessions (fixed-position would misplace in full-page screenshots, so the standalone screenshot route skips it).
+- Verified live: move(400,300) → cursor translate(398,298) in sync with screen.mouse(400,300), screenshots normal.
 
 ### v1.18.0 (2026-08-22)
 

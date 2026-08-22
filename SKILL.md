@@ -1,7 +1,7 @@
 ---
 name: deepseek-web-search
 description: DeepSeek 联网搜索技能。遇到实时信息、事实核查、新闻、价格、代码报错、未知名词或用户说“搜一下”时，必须使用本技能搜索并附来源。
-version: 1.18.0
+version: 1.19.0
 updated: 2026-08-22
 author: user
 license: MIT
@@ -120,6 +120,8 @@ tags: [web, search, deepseek, 联网, 搜索]
 **中文输入备忘**：视觉会话原 `type`（纯坐标聚焦）对中文可能输出 `???`；**v1.15.0 起用精准输入 `{"action":"type","selector":"...","text":"中文"}`**——键盘通道失败自动 JS 设值兜底，中文可靠；纯 HTTP 搜索中文关键词建议直接走 `search.py`（不出输入法问题）。
 
 **每步输出状态**：`screenshot`（最新截图路径）+ `screen`（视口尺寸/整页尺寸/DPR/鼠标位置/滚动位置/当前焦点元素 active_element——你据此判断坐标和 Tab 导航结果）+ `screenshots_used/max`（成本计数）+ `api_hint`（官方 API 参数照抄即可拼请求：base64 内联、detail 等级、384 token 封顶）。失败指令（缺 x/y、缺 text、坏 JSON）只回错误 note 不消耗截图配额——页面没变不用重拍。`eval` 的结构化结果放 `eval_result` 字段（note 里是文本版）。启动 URL 打不开时**会话保活**（note 提示 startup url failed），直接发 `goto` 指令换 URL 即可，不用重开会话。页面发生跳转时初始状态带 `redirected_from` 告警。
+
+**虚拟鼠标指针（v1.19.0，视觉会话自带）**：无头截图不渲染系统光标——会话自动注入一个**放大的白色箭头指针（34px，黑描边，任何底色都看得清）**，实时跟随鼠标。截图里那个白色大箭头就是鼠标当前位置，与 `screen.mouse` 坐标一致；AI 不用再靠数字猜"鼠标在哪"。
 
 **elements 元素标注**（点按钮前先拿这个，不用从截图猜像素）：返回视口内全部可见可点元素 `[{tag, text, x, y, w, h, type, name}]`——x/y 是中心坐标直接喂给 click。
 

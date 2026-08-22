@@ -2257,6 +2257,36 @@ window.__mx = 0; window.__my = 0;
 document.addEventListener('mousemove', e => { window.__mx = e.clientX; window.__my = e.clientY; });
 """
 
+# 虚拟鼠标指针（v1.19.0，视觉会话专用）：无头截图不渲染系统光标，AI 只能靠
+# screen.mouse 的数字坐标猜——这个覆盖层画一个放大的白色箭头（黑描边，任何
+# 底色都看得清），实时跟随 mousemove，截图里直接可见"鼠标在哪"。
+# pointer-events:none 不挡点击；挂在 documentElement 上（页面清 body 也不丢）；
+# CDP 驱动的 mouse.move/click 同样触发 mousemove，所以 AI 每次操作后指针都会跟着走。
+CURSOR_OVERLAY_JS = """
+(() => {
+    if (window.__aiCursor) return;
+    const el = document.createElement('div');
+    el.id = '__ai_cursor__';
+    el.style.cssText = 'position:fixed;left:0;top:0;z-index:2147483647;'
+        + 'pointer-events:none;width:34px;height:34px;';
+    el.innerHTML = '<svg width="34" height="34" viewBox="0 0 24 24" '
+        + 'style="filter:drop-shadow(0 1px 3px rgba(0,0,0,.9))">'
+        + '<path d="M4 2 L4 20 L8.5 15.5 L11.5 22 L14 20.8 L11 14.5 L17 14 Z" '
+        + 'fill="#ffffff" stroke="#000000" stroke-width="1.4" stroke-linejoin="round"/></svg>';
+    const place = (x, y) => { el.style.transform = 'translate(' + (x - 2) + 'px,' + (y - 2) + 'px)'; };
+    const onMove = e => { place(e.clientX, e.clientY); };
+    const boot = () => {
+        document.documentElement.appendChild(el);
+        document.addEventListener('mousemove', onMove, true);
+        place(window.__mx || 0, window.__my || 0);
+    };
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', boot);
+    } else { boot(); }
+    window.__aiCursor = true;
+})();
+"""
+
 
 def _is_vision_model(model: str) -> bool:
     """判定模型是否支持视觉（多模态）。官方目前仅 deepseek-v4-flash-vision-exp
@@ -2990,7 +3020,9 @@ def _vision_route(url: str, output_dir: Path, headed: bool = False, safe: bool =
                 )
             try:
                 stealth_used = _apply_stealth(context, stealth)
-                context.add_init_script(MOUSE_TRACK_JS)
+                # 虚拟鼠标指针：无头截图不渲染系统光标——注入放大白色箭头覆盖层，
+                # AI 在截图里直接看到"鼠标在哪"（screen.mouse 坐标仍在状态流里）
+                context.add_init_script(MOUSE_TRACK_JS + CURSOR_OVERLAY_JS)
                 # 登录态注入（--cookies / --cookies-from-browser）：
                 # 豆包等登录墙站点带 cookie 开会，否则能打字但发送无反应
                 if cookie_file or cookies_from_browser:

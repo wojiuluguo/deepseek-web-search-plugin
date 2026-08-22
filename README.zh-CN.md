@@ -4,7 +4,7 @@
 
 OpenClaw Skill：让 DeepSeek 模型能搜索、会搜索、并且"该搜就搜"，还能自动下载网页里的视频/音频/图片/文件，多模态模型还能"看页面+操作页面"。
 
-> 当前版本 **v1.18.0**（2026-08-22）· 作者：user · [更新记录](#更新记录)
+> 当前版本 **v1.19.0**（2026-08-22）· 作者：user · [更新记录](#更新记录)
 
 <p align="center"><img src="assets/mascot.png" alt="deepseek-web-search 吉祥物" width="220"></p>
 
@@ -199,6 +199,14 @@ deepseek-web-search-plugin/
 - APP 引流陷阱页（只跳应用商店无真文件）会如实报 `app_only: true`，这是站点本身不提供网页端下载，非脚本缺陷。
 
 ## 更新记录
+
+### v1.19.0（2026-08-22）
+
+视觉会话虚拟鼠标指针：
+
+- **新增虚拟鼠标指针（视觉会话自带，无需参数）**：无头截图不渲染系统光标，AI 此前只能靠 `screen.mouse` 数字坐标猜"鼠标在哪"。现在会话自动注入一个**放大的白色箭头指针（34px，黑描边，任何底色都看得清）**，实时跟随鼠标（CDP 驱动的 move/click/drag 都会触发），截图里直接可见——白色大箭头 = 鼠标当前位置，与 screen.mouse 坐标一致
+- 实现：注入式覆盖层（pointer-events:none 不挡点击、挂 documentElement 页面清 body 不丢、DOMContentLoaded 前自动等待）；仅视觉会话启用（整页截图的 fixed 定位会错位，独立截图线不注）
+- 实测：move(400,300) → 指针 translate(398,298) 与 screen.mouse(400,300) 同步，截图正常
 
 ### v1.18.0（2026-08-22）
 
