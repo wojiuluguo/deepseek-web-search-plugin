@@ -1,8 +1,8 @@
 ---
 name: deepseek-web-search
 description: DeepSeek 联网搜索技能。遇到实时信息、事实核查、新闻、价格、代码报错、未知名词或用户说“搜一下”时，必须使用本技能搜索并附来源。
-version: 1.20.0
-updated: 2026-08-22
+version: 1.21.0
+updated: 2026-08-23
 author: user（抖音号: 94636651553）
 license: MIT
 tags: [web, search, deepseek, 联网, 搜索]
@@ -91,6 +91,8 @@ tags: [web, search, deepseek, 联网, 搜索]
 {"action":"click","text":"扫码登录"}     // 按页面文字找元素点中心（DOM精准，推荐）
 {"action":"click","selector":"button.ok"} // 按选择器点元素中心（DOM精准，推荐）
 {"action":"click","x":100,"y":200}     // 左键点击（原坐标模式，兼容保留；其他动作同理）
+{"action":"click"}                     // 快捷点击：直接点【当前鼠标位置】（先 move 瞄准再发，不用重复报坐标）
+{"action":"click","button":"right"}    // 快捷右键：在当前鼠标位置右键（默认左键）
 {"action":"right_click","x":100,"y":200}
 {"action":"move","text":"登录"}         // 鼠标移到元素中心（DOM精准）；{"action":"move","x":300,"y":150} 坐标模式
 {"action":"drag","x":100,"y":300,"to_x":350,"to_y":300}  // 拖动（滑块/画布类；HTML5 draggable 不保证触发）
@@ -110,6 +112,8 @@ tags: [web, search, deepseek, 联网, 搜索]
 {"action":"shot_policy","interval_ms":1000}      // 空闲时每秒自动截 1 张（默认 0=关；预算耗尽自动停）
 {"action":"quit"}
 ```
+
+**快捷点击 + 点击涟漪（v1.21.0）**：`{"action":"click"}` 不带任何参数 = 直接点**当前鼠标位置**（先 `move` 瞄准再 `click`，不用重复报坐标；`{"action":"click","button":"right"}` = 在当前位置右键）。三种点击模式（DOM精准/坐标/快捷）都会在点击位置画一圈**扩散涟漪**（白圈黑边，约 0.5 秒淡出）——下一张截图直接看到"刚才点在哪"，确认点击生效。
 
 **DOM 精准模式（v1.15.0，默认推荐）**：click/move/scroll 给 `text`（按页面文字找元素）或 `selector`（CSS 选择器）、type 给 `selector`，就走精准路径——**定位元素 → 等它可见(3s) → 取包围盒中心执行 → 验证效果 → 失败自动重试（最多 3 次）**。比从截图猜像素准得多，SPA 动态挂载/懒加载页面不再点空。type 精准模式自带回读验证（输入框内容必须真的包含所输文字，否则 JS 设值兜底——React 受控组件/富文本编辑器认事件不认按键，这套专治"输入后文字消失"）。click 可加 `"expect_gone": true` 要求点击后元素消失（关弹窗/下拉验证）。只给 x/y 时走原坐标路径，行为完全不变。
 

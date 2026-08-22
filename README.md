@@ -4,7 +4,7 @@ English | **[中文](README.zh-CN.md)**
 
 An [OpenClaw](https://github.com/openclaw) skill that gives DeepSeek real web search **and** an auto-save browser that downloads videos/audio/images/files from any webpage it opens — plus a vision mode for multimodal models (see a page, operate a page).
 
-> Current version **v1.20.0** (2026-08-22) · Author: user (Douyin ID: 94636651553) · [Changelog](#changelog)
+> Current version **v1.21.0** (2026-08-23) · Author: user (Douyin ID: 94636651553) · [Changelog](#changelog)
 
 <p align="center"><img src="assets/mascot.png" alt="deepseek-web-search mascot" width="220"></p>
 
@@ -197,6 +197,15 @@ deepseek-web-search-plugin/
 - App-funnel pages (only app-store redirects, no real files) honestly report `app_only: true` — the site itself offers no web download; this is not a script defect.
 
 ## Changelog
+
+### v1.21.0 (2026-08-23)
+
+Quick click + click ripple (pre-school-term wrap-up):
+
+- **Quick click**: `{"action":"click"}` with no arguments clicks the **current mouse position** — aim with `move` first, then just send `click`; `{"action":"click","button":"right"}` right-clicks there. The coordinate mode (x/y) and DOM-precise mode (selector/text) are fully preserved — three coexisting modes, chosen per situation.
+- **Click ripple feedback**: every click in all three modes draws an **expanding ripple** (white ring, black edge, ~0.5s fade) at the click point — the next screenshot shows exactly where the click landed (a 150ms pause ensures it's captured).
+- Full check: all 9 scripts compile, AST parameter-chain check passes; quick/coordinate/DOM modes and the ripple verified live.
+- Sporadic updates **possible** within the next week or two (maintainer heading back to school; unscheduled).
 
 ### v1.20.0 (2026-08-22)
 

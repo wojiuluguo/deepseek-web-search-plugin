@@ -2306,6 +2306,23 @@ CURSOR_OVERLAY_JS = """
         setShape(shape_for(document.elementFromPoint(e.clientX, e.clientY)));
         place(e.clientX, e.clientY);
     };
+    // 点击视觉反馈（v1.21.0）：在点击位置画一圈扩散涟漪（白圈黑边，~0.5s 淡出），
+    // 截图里能直接看到"刚才在这里点了"。由 Python 侧 _click_flash 在每次点击后调用。
+    window.__aiCursorFlash = (x, y) => {
+        const f = document.createElement('div');
+        f.id = '__ai_click_ripple__';
+        f.style.cssText = 'position:fixed;left:' + (x - 18) + 'px;top:' + (y - 18) + 'px;'
+            + 'width:36px;height:36px;z-index:2147483646;pointer-events:none;'
+            + 'border:3px solid #ffffff;box-shadow:0 0 0 2px #000000, inset 0 0 0 2px #000000;'
+            + 'border-radius:50%;transform:scale(.3);opacity:1;'
+            + 'transition:transform .35s ease-out, opacity .5s ease-out';
+        document.documentElement.appendChild(f);
+        requestAnimationFrame(() => {
+            f.style.transform = 'scale(1.3)';
+            f.style.opacity = '0';
+        });
+        setTimeout(() => f.remove(), 600);
+    };
     const boot = () => {
         document.documentElement.appendChild(el);
         setShape('arrow');
@@ -2620,6 +2637,19 @@ def _vision_el_center(page, el) -> Optional[Tuple[float, float]]:
     return (box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
 
 
+def _click_flash(page, x: float, y: float) -> None:
+    """点击视觉反馈（v1.21.0）：在点击位置触发一圈扩散涟漪（白圈黑边，~0.5s 淡出），
+    下一张截图里能直接看到"刚才在这里点了"。涟漪函数由 CURSOR_OVERLAY_JS 注入；
+    注入失败（极端：覆盖层没起来）时静默跳过——不影响点击本身。"""
+    try:
+        page.evaluate(
+            "([x, y]) => { if (window.__aiCursorFlash) window.__aiCursorFlash(x, y); }",
+            [x, y],
+        )
+    except Exception:
+        pass
+
+
 def _vision_dom_action(page, act: str, cmd: Dict, max_attempts: int = 3) -> Dict:
     """DOM 精准执行 click/dblclick/right_click/move/scroll：
     定位(selector/文字) → 等可见(3s) → 包围盒中心执行(scroll=滚进视口) →
@@ -2647,6 +2677,7 @@ def _vision_dom_action(page, act: str, cmd: Dict, max_attempts: int = 3) -> Dict
                 page.mouse.click(cx, cy, button="right")
             else:
                 page.mouse.click(cx, cy)
+            _click_flash(page, cx, cy)  # 点击涟漪反馈（截图可见"点在这"）
             page.wait_for_timeout(300)
             if cmd.get("expect_gone"):
                 # 可选效果验证：要求点击后元素消失（关弹窗/关下拉这类）
@@ -2739,13 +2770,26 @@ def _vision_exec_action(page, cmd: Dict, output_dir: Path, prefix: str,
             return _vision_dom_action(page, act, cmd)
     if act == "type" and _has_locator:
         return _vision_dom_type(page, cmd)
-    # 坐标类动作必须显式给 x/y：缺坐标默认 (0,0) 会盲点到 BODY 上还"假成功"
+    # v1.21.0 快捷点击：click/dblclick/right_click 不给 x/y 也不给定位 →
+    # 直接点"当前鼠标位置"（先 move 瞄准，再发 {"action":"click"} 即可，不用重复报坐标；
+    # 可选 "button":"right" 换右键）。move 仍需坐标/定位（移到原地没意义）。
+    quick = False
     if act in ("click", "dblclick", "right_click", "move") and ("x" not in cmd or "y" not in cmd):
-        return {"ok": False, "note": f"{act} 缺少定位：精准模式给 selector 或 text（推荐），坐标模式给 x/y（先发 elements 拿准坐标）"}
-    x, y = cmd.get("x", 0), cmd.get("y", 0)
+        if act == "move":
+            return {"ok": False, "note": "move 缺少定位：精准模式给 selector 或 text（推荐），坐标模式给 x/y（先发 elements 拿准坐标）"}
+        try:
+            cur = page.evaluate("() => ({x: window.__mx || 0, y: window.__my || 0})") or {}
+        except Exception as exc:
+            return {"ok": False, "note": f"快捷点击失败：读不到当前鼠标位置（{exc}）"}
+        x, y = int(cur.get("x", 0)), int(cur.get("y", 0))
+        quick = True
+    else:
+        x, y = cmd.get("x", 0), cmd.get("y", 0)
     try:
         if act == "click":
-            page.mouse.click(x, y)
+            # button 参数：{"action":"click","button":"right"} = 右键（默认左键）
+            btn = "right" if str(cmd.get("button", "")).lower() == "right" else "left"
+            page.mouse.click(x, y, button=btn)
         elif act == "dblclick":
             page.mouse.dblclick(x, y)
         elif act == "right_click":
@@ -2886,6 +2930,15 @@ def _vision_exec_action(page, cmd: Dict, output_dir: Path, prefix: str,
             pass  # 由调用方处理
         else:
             return {"ok": False, "note": f"未知动作: {act}（支持: {', '.join(VISION_ACTIONS)}）"}
+        # 点击类动作（坐标/快捷模式）：涟漪反馈 + 短暂停留让下一张截图拍到扩散中的圈
+        if act in ("click", "dblclick", "right_click"):
+            _click_flash(page, x, y)
+            try:
+                page.wait_for_timeout(150)
+            except Exception:
+                pass
+            if quick:
+                return {"ok": True, "note": f"快捷点击：已在当前鼠标位置 ({x},{y}) 完成 {act}"}
         return {"ok": True, "note": ""}
     except Exception as exc:
         return {"ok": False, "note": f"{act} 失败: {exc}"}
@@ -2921,6 +2974,8 @@ def _vision_route(url: str, output_dir: Path, headed: bool = False, safe: bool =
          {"action":"click","text":"扫码登录"}          按页面文字找元素点中心（DOM精准，默认推荐）
          {"action":"click","selector":"button.submit"} 按选择器点元素中心（DOM精准，默认推荐）
          {"action":"click","x":100,"y":200}            按视口坐标点（原坐标模式，兼容保留）
+         {"action":"click"}                            快捷点击：直接点当前鼠标位置（先 move 瞄准再发，不用重复报坐标）
+         {"action":"click","button":"right"}           快捷右键：在当前鼠标位置右键（默认左键）
          {"action":"right_click","x":..,"y":..}        右键 / {"action":"dblclick",...} 双击（同样支持 text/selector）
          {"action":"move","text":"登录"}               鼠标移到元素中心；{"action":"move","x":..,"y":..} 坐标模式
          {"action":"drag","x":..,"y":..,"to_x":..,"to_y":..}  拖动（滑块/画布类；HTML5 draggable 不保证触发）
