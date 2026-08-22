@@ -4,7 +4,7 @@ English | **[中文](README.zh-CN.md)**
 
 An [OpenClaw](https://github.com/openclaw) skill that gives DeepSeek real web search **and** an auto-save browser that downloads videos/audio/images/files from any webpage it opens — plus a vision mode for multimodal models (see a page, operate a page).
 
-> Current version **v1.19.0** (2026-08-22) · Author: user · [Changelog](#changelog)
+> Current version **v1.19.1** (2026-08-22) · Author: user (Douyin ID: 94636651553) · [Changelog](#changelog)
 
 <p align="center"><img src="assets/mascot.png" alt="deepseek-web-search mascot" width="220"></p>
 
@@ -197,6 +197,15 @@ deepseek-web-search-plugin/
 - App-funnel pages (only app-store redirects, no real files) honestly report `app_only: true` — the site itself offers no web download; this is not a script defect.
 
 ## Changelog
+
+### v1.19.1 (2026-08-22)
+
+Maintenance release (full audit + author info + project article):
+
+- **Full code audit**: all 9 scripts compile; AST parameter-chain check passes (no unknown args, no edit leftovers); all 8 stealth hookup points verified; 5 routes smoke-tested green. Historical low-severity leftovers (`\\n` log typo / English vision-session notes / concat-failure cleanup) confirmed all fixed — no new bugs found.
+- **Author info**: Douyin ID 94636651553 added to SKILL.md / package.json / both READMEs.
+- **New [ARTICLE.md](ARTICLE.md)**: the project's story — three iron rules (degradation chains / never trust declared metadata / never fabricate), vision-mode lessons, and the wisdom of not fighting login walls head-on.
+- The project pauses updates for a week or two after this release (maintainer rest).
 
 ### v1.19.0 (2026-08-22)
 

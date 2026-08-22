@@ -1,6 +1,6 @@
 {
   "name": "deepseek-web-search",
-  "version": "1.19.0",
+  "version": "1.19.1",
   "description": "DeepSeek 联网搜索技能：Playwright 真实浏览器模拟 + 轻量多引擎搜索 + 自动保存型浏览器下载、免 API Key、强制引用来源。",
   "main": "scripts/search.py",
   "scripts": {
@@ -21,6 +21,6 @@
     "search",
     "联网搜索"
   ],
-  "author": "user",
+  "author": "user（抖音号: 94636651553）",
   "license": "MIT"
 }
