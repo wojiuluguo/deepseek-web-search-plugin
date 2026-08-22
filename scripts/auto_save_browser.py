@@ -2429,15 +2429,161 @@ def _eval_watchdog_thread(debug_port: int, timeout_s: float, cancelled, fired) -
         pass  # 看门狗自身失败不影响主流程（退化为原始行为：eval 一直阻塞）
 
 
+# ---------- DOM 精准化（v1.15.0）：文字/选择器定位 + 等可见 + 中心点 + 验证 + 重试 ----------
+# 背景：纯坐标点击靠 AI 从截图猜像素，SPA 页面元素动态挂载/懒加载时经常点空。
+# 精准模式让 AI 像 Playwright 原生脚本一样"找元素再操作"：
+#   selector 优先，其次按页面文字定位 → 等元素可见 → 取包围盒中心执行 → 验证 → 失败重试 3 次。
+# 只给 x/y 时走原坐标路径，行为完全不变（向后兼容，AI 按场景自选）。
+
+
+def _vision_find_el(page, cmd: Dict, for_type: bool = False):
+    """按 selector / 页面文字定位元素。返回 (locator, 定位说明) 或 (None, 原因)。
+    注意：type 指令的 "text" 是要输入的内容（历史语义，不能动），所以 type 只认 selector。"""
+    sel = str(cmd.get("selector", "") or "").strip()
+    txt = "" if for_type else str(cmd.get("text", "") or "").strip()
+    if sel:
+        try:
+            return page.locator(sel).first, f"选择器 {sel}"
+        except Exception as exc:
+            return None, f"选择器无效: {exc}"
+    if txt:
+        return page.get_by_text(txt, exact=False).first, f"文字“{txt}”"
+    return None, "缺少 selector/text 定位参数"
+
+
+def _vision_el_center(page, el) -> Optional[Tuple[float, float]]:
+    """元素包围盒中心坐标（视口像素，与视觉会话坐标同一基准）。"""
+    try:
+        box = el.bounding_box()
+    except Exception:
+        return None
+    if not box:
+        return None
+    return (box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+
+
+def _vision_dom_action(page, act: str, cmd: Dict, max_attempts: int = 3) -> Dict:
+    """DOM 精准执行 click/dblclick/right_click/move/scroll：
+    定位(selector/文字) → 等可见(3s) → 包围盒中心执行(scroll=滚进视口) →
+    expect_gone 可选验证 → 失败自动重试（默认 3 次，间隔 400ms）。"""
+    reason = "未尝试"
+    for attempt in range(1, max_attempts + 1):
+        el, how = _vision_find_el(page, cmd)
+        if el is None:
+            return {"ok": False, "note": f"DOM精准模式定位失败: {how}"}
+        try:
+            el.wait_for(state="visible", timeout=3000)
+            if act == "scroll":
+                el.scroll_into_view_if_needed(timeout=3000)
+                return {"ok": True, "note": f"已按{how}定位并把元素滚动到视口内"}
+            center = _vision_el_center(page, el)
+            if not center:
+                raise RuntimeError("拿不到元素包围盒（元素可能刚被页面移除）")
+            cx, cy = center
+            if act == "move":
+                page.mouse.move(cx, cy)
+                return {"ok": True, "note": f"已按{how}定位，鼠标移到元素中心 ({int(cx)},{int(cy)})"}
+            if act == "dblclick":
+                page.mouse.dblclick(cx, cy)
+            elif act == "right_click":
+                page.mouse.click(cx, cy, button="right")
+            else:
+                page.mouse.click(cx, cy)
+            page.wait_for_timeout(300)
+            if cmd.get("expect_gone"):
+                # 可选效果验证：要求点击后元素消失（关弹窗/关下拉这类）
+                if el.is_visible():
+                    raise RuntimeError("点击后元素仍可见（expect_gone 验证未通过）")
+                return {"ok": True, "note": f"已按{how}定位点击 ({int(cx)},{int(cy)})，元素已消失（验证通过）"}
+            return {"ok": True, "note": f"已按{how}定位点击元素中心 ({int(cx)},{int(cy)})"}
+        except Exception as exc:
+            reason = str(exc)
+            if attempt < max_attempts:
+                try:
+                    page.wait_for_timeout(400)
+                except Exception:
+                    pass
+    return {"ok": False, "note": f"DOM精准{act}失败（已重试{max_attempts}次）: {reason[:160]}"}
+
+
+def _vision_dom_type(page, cmd: Dict, max_attempts: int = 3) -> Dict:
+    """DOM 精准输入（type + selector）：等输入框可见 → 点中心聚焦 → 键盘输入 →
+    回读验证（value/innerText 应包含所输内容）→ 不过则 JS 设值兜底
+    （input/textarea 设 value+补发 input/change 事件；富文本编辑器用
+    execCommand insertText 触发真实 input——React 受控组件/ProseMirror 认这套，
+    治"输入后文字消失"）→ 仍失败重试。"""
+    text = str(cmd.get("text", ""))
+    if not text:
+        return {"ok": False, "note": "type 缺少 text（要输入的内容）"}
+    reason = "未尝试"
+    for attempt in range(1, max_attempts + 1):
+        el, how = _vision_find_el(page, cmd, for_type=True)
+        if el is None:
+            return {"ok": False, "note": f"DOM精准输入需要 selector 定位输入框: {how}"}
+        try:
+            el.wait_for(state="visible", timeout=3000)
+            center = _vision_el_center(page, el)
+            if center:
+                page.mouse.click(center[0], center[1])  # 点中心聚焦输入框
+            page.keyboard.type(text, delay=30)
+            page.wait_for_timeout(250)
+            val = el.evaluate(
+                "e => (e.value !== undefined ? e.value : (e.innerText || '')) || ''"
+            )
+            if text in val:
+                return {"ok": True, "note": f"已按{how}聚焦并输入 {len(text)} 字（回读验证通过）"}
+            # 回读没有 → 受控组件没吃到按键：JS 设值兜底 + 补发事件
+            el.evaluate(
+                """(e, t) => {
+                    if (e.value !== undefined) {
+                        e.value = t;
+                        e.dispatchEvent(new Event('input', {bubbles: true}));
+                        e.dispatchEvent(new Event('change', {bubbles: true}));
+                    } else {
+                        e.focus();
+                        document.execCommand('selectAll', false, null);
+                        document.execCommand('insertText', false, t);
+                    }
+                }""",
+                text,
+            )
+            page.wait_for_timeout(250)
+            val2 = el.evaluate(
+                "e => (e.value !== undefined ? e.value : (e.innerText || '')) || ''"
+            )
+            if text in val2:
+                return {"ok": True,
+                        "note": f"已按{how}输入 {len(text)} 字（键盘输入未生效，JS 设值兜底生效，已验证）"}
+            reason = f"回读验证失败：输入框内容不含所输文本（现有内容 {len(val2)} 字符）"
+        except Exception as exc:
+            reason = str(exc)
+        if attempt < max_attempts:
+            try:
+                page.wait_for_timeout(400)
+            except Exception:
+                pass
+    return {"ok": False, "note": f"DOM精准输入失败（已重试{max_attempts}次）: {reason[:160]}"}
+
+
 def _vision_exec_action(page, cmd: Dict, output_dir: Path, prefix: str,
                         wait_cap_ms: int = 0, debug_port: int = 0) -> Dict:
     """执行一条视觉会话指令，返回 {ok, note}。指令格式见 _vision_route 文档。
     wait_cap_ms>0 时 wait 指令的毫秒数被钳到该值（会话剩余预算），防长 wait 拖爆总超时。
     debug_port>0 时 eval 指令带死循环看门狗（超时强杀页面，会话保活）。"""
     act = (cmd.get("action") or "").strip().lower()
+    # DOM 精准模式（v1.15.0，默认推荐）：给了 selector（或 click/move/scroll 给了 text）
+    # 就走"定位→等可见→包围盒中心→验证→重试"精准路径，比从截图猜像素准。
+    # type 的 text 是输入内容（历史语义），type 精准模式只认 selector。
+    # 只给 x/y 时保持原坐标行为完全不变（向后兼容，AI 按场景自选）。
+    _has_locator = bool(str(cmd.get("selector", "") or "").strip())
+    if act in ("click", "dblclick", "right_click", "move", "scroll"):
+        if _has_locator or str(cmd.get("text", "") or "").strip():
+            return _vision_dom_action(page, act, cmd)
+    if act == "type" and _has_locator:
+        return _vision_dom_type(page, cmd)
     # 坐标类动作必须显式给 x/y：缺坐标默认 (0,0) 会盲点到 BODY 上还"假成功"
     if act in ("click", "dblclick", "right_click", "move") and ("x" not in cmd or "y" not in cmd):
-        return {"ok": False, "note": f"{act} 缺少 x/y 坐标（视口像素；先发 elements 指令拿准坐标）"}
+        return {"ok": False, "note": f"{act} 缺少定位：精准模式给 selector 或 text（推荐），坐标模式给 x/y（先发 elements 拿准坐标）"}
     x, y = cmd.get("x", 0), cmd.get("y", 0)
     try:
         if act == "click":
@@ -2575,23 +2721,28 @@ def _vision_route(url: str, output_dir: Path, headed: bool = False, safe: bool =
     协议（stdin/stdout 各一行一个 JSON，AI Agent 驱动）：
       1. 启动后 stdout 输出初始状态（首屏截图 + 屏幕信息）
       2. AI 逐行往 stdin 写指令 JSON，例如：
-         {"action":"click","x":100,"y":200}   左键点击（坐标=视口像素）
-         {"action":"right_click","x":..,"y":..} 右键 / {"action":"dblclick",...} 双击
-         {"action":"move","x":..,"y":..}        移动鼠标（视觉模型先看再点）
+         {"action":"click","text":"扫码登录"}          按页面文字找元素点中心（DOM精准，默认推荐）
+         {"action":"click","selector":"button.submit"} 按选择器点元素中心（DOM精准，默认推荐）
+         {"action":"click","x":100,"y":200}            按视口坐标点（原坐标模式，兼容保留）
+         {"action":"right_click","x":..,"y":..}        右键 / {"action":"dblclick",...} 双击（同样支持 text/selector）
+         {"action":"move","text":"登录"}               鼠标移到元素中心；{"action":"move","x":..,"y":..} 坐标模式
          {"action":"drag","x":..,"y":..,"to_x":..,"to_y":..}  拖动（滑块/画布类；HTML5 draggable 不保证触发）
-         {"action":"scroll","x":0,"y":600}      滚动（y 正=向下）
-         {"action":"type","text":"关键词"}       键盘输入
-         {"action":"press","key":"Enter"}       按键
-         {"action":"focus","selector":"input[name=q]"}  按 CSS 选择器聚焦（输入前先 focus 比裸坐标点更可靠）
-         {"action":"elements"}                元素标注：返回视口内全部可点元素（tag/text/中心坐标/尺寸），点按钮前先拿这个
-         {"action":"goto","url":"https://.."}   跳转 / back / forward / reload（启动 URL 失败会话也保活，可 goto 重试）
-         {"action":"wait","ms":800}             等待（等动画/懒加载）
-         {"action":"screenshot"}                主动重新截图
-         {"action":"eval","js":"1+1"}           执行 JS（只读用途，结构化结果放 state 的 eval_result 字段）
+         {"action":"scroll","selector":"#footer"}      把元素滚进视口；{"action":"scroll","x":0,"y":600} 原坐标滚动（y 正=向下）
+         {"action":"type","selector":"input[name=q]","text":"关键词"}  精准输入（点聚焦+输入+回读验证+JS兜底，治"输入后消失"）
+         {"action":"type","text":"关键词"}             原模式：敲进当前焦点元素
+         {"action":"press","key":"Enter"}              按键（精准输入后按回车提交）
+         {"action":"focus","selector":"input[name=q]"} 按 CSS 选择器聚焦（输入前先 focus 比裸坐标点更可靠）
+         {"action":"elements"}                         元素标注：返回视口内全部可点元素（tag/text/中心坐标/尺寸），点按钮前先拿这个
+         {"action":"goto","url":"https://.."}          跳转 / back / forward / reload（启动 URL 失败会话也保活，可 goto 重试）
+         {"action":"wait","ms":800}                    等待（等动画/懒加载）
+         {"action":"screenshot"}                       主动重新截图
+         {"action":"eval","js":"1+1"}                  执行 JS（只读用途，结构化结果放 state 的 eval_result 字段）
          {"action":"viewport","width":1280,"height":800}  改视口（默认 800×800=DeepSeek 原生；改完重新 elements）
-         {"action":"shot_policy","every":3}     截图节奏：每 3 个成功动作截 1 张（默认 1=动一次拍一次）
-         {"action":"shot_policy","interval_ms":1000}      空闲时每秒自动截 1 张（默认 0=关；预算耗尽自动停）
-         {"action":"quit"}                      结束会话
+         {"action":"shot_policy","every":3}            截图节奏：每 3 个成功动作截 1 张（默认 1=动一次拍一次）
+         {"action":"shot_policy","interval_ms":1000}   空闲时每秒自动截 1 张（默认 0=关；预算耗尽自动停）
+         {"action":"quit"}                             结束会话
+         可选验证参数：click 加 "expect_gone": true = 点击后要求元素消失（关弹窗/关下拉类），
+         验证不过会自动重试（click/move/scroll/type 精准模式失败均自动重试最多 3 次）。
       3. 每条指令执行后 stdout 输出新状态（新截图 + 屏幕信息），直到 quit 或 stdin 关闭
 
     兜底（防 AI 侧故障拖死本进程）：

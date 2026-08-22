@@ -4,7 +4,7 @@ English | **[中文](README.zh-CN.md)**
 
 An [OpenClaw](https://github.com/openclaw) skill that gives DeepSeek real web search **and** an auto-save browser that downloads videos/audio/images/files from any webpage it opens — plus a vision mode for multimodal models (see a page, operate a page).
 
-> Current version **v1.14.2** (2026-08-22) · Author: user · [Changelog](#changelog)
+> Current version **v1.15.0** (2026-08-22) · Author: user · [Changelog](#changelog)
 
 <p align="center"><img src="assets/mascot.png" alt="deepseek-web-search mascot" width="220"></p>
 
@@ -197,6 +197,16 @@ deepseek-web-search-plugin/
 - App-funnel pages (only app-store redirects, no real files) honestly report `app_only: true` — the site itself offers no web download; this is not a script defect.
 
 ## Changelog
+
+### v1.15.0 (2026-08-22)
+
+DOM-precise vision session — click/move/scroll/type no longer rely on guessed pixels:
+
+- **New DOM-precise mode (default recommended)**: `click`/`move`/`scroll` accept `"text"` (locate by on-page text) or `"selector"` (CSS); `type` accepts `"selector"` for the input box. Pipeline: locate → wait visible (3s) → act on bounding-box center (scroll = scroll into view) → verify → auto-retry up to 3 times.
+- **Precise typing has read-back verification**: after typing, the input's value/innerText must contain the typed text, otherwise a JS fallback sets the value and dispatches input/change events (contenteditable uses execCommand insertText for a real input event) — React controlled components and ProseMirror honor events, not keystrokes; this fixes "typed text disappears".
+- **`"expect_gone": true`** optional click verification (element must disappear — closing popups/dropdowns).
+- **Coordinate mode fully preserved** (x/y-only commands behave exactly as before, backward compatible). Regression-tested live: click-by-text, precise typing with verification, element scroll, and coordinate mode all pass.
+- Hidden elements fail honestly (wait-visible timeout → 3 retries → clear error) instead of blind-clicking.
 
 ### v1.14.2 (2026-08-22)
 

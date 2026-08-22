@@ -1,7 +1,7 @@
 ---
 name: deepseek-web-search
 description: DeepSeek 联网搜索技能。遇到实时信息、事实核查、新闻、价格、代码报错、未知名词或用户说“搜一下”时，必须使用本技能搜索并附来源。
-version: 1.14.2
+version: 1.15.0
 updated: 2026-08-22
 author: user
 license: MIT
@@ -85,12 +85,16 @@ tags: [web, search, deepseek, 联网, 搜索]
 **视觉会话指令**（一行一个 JSON）：
 
 ```json
-{"action":"click","x":100,"y":200}     // 左键点击（视口坐标）
+{"action":"click","text":"扫码登录"}     // 按页面文字找元素点中心（DOM精准，推荐）
+{"action":"click","selector":"button.ok"} // 按选择器点元素中心（DOM精准，推荐）
+{"action":"click","x":100,"y":200}     // 左键点击（原坐标模式，兼容保留；其他动作同理）
 {"action":"right_click","x":100,"y":200}
-{"action":"move","x":300,"y":150}      // 先移鼠标看清位置再点
+{"action":"move","text":"登录"}         // 鼠标移到元素中心（DOM精准）；{"action":"move","x":300,"y":150} 坐标模式
 {"action":"drag","x":100,"y":300,"to_x":350,"to_y":300}  // 拖动（滑块/画布类；HTML5 draggable 不保证触发）
-{"action":"scroll","x":0,"y":600}      // 滚动（y 正=向下）
-{"action":"type","text":"搜索词"}
+{"action":"scroll","selector":"#footer"} // 把元素滚进视口（DOM精准）；{"action":"scroll","x":0,"y":600} 坐标滚动（y 正=向下）
+{"action":"type","selector":"input[name=q]","text":"搜索词"}  // 精准输入（点聚焦+输入+回读验证+JS兜底，治"输入后消失"）
+{"action":"type","text":"搜索词"}       // 原模式：敲进当前焦点元素
+{"action":"press","key":"Enter"}
 {"action":"focus","selector":"input[name=q]"}
 {"action":"elements"}
 {"action":"goto","url":"https://..."}
@@ -101,6 +105,8 @@ tags: [web, search, deepseek, 联网, 搜索]
 {"action":"shot_policy","interval_ms":1000}      // 空闲时每秒自动截 1 张（默认 0=关；预算耗尽自动停）
 {"action":"quit"}
 ```
+
+**DOM 精准模式（v1.15.0，默认推荐）**：click/move/scroll 给 `text`（按页面文字找元素）或 `selector`（CSS 选择器）、type 给 `selector`，就走精准路径——**定位元素 → 等它可见(3s) → 取包围盒中心执行 → 验证效果 → 失败自动重试（最多 3 次）**。比从截图猜像素准得多，SPA 动态挂载/懒加载页面不再点空。type 精准模式自带回读验证（输入框内容必须真的包含所输文字，否则 JS 设值兜底——React 受控组件/富文本编辑器认事件不认按键，这套专治"输入后文字消失"）。click 可加 `"expect_gone": true` 要求点击后元素消失（关弹窗/下拉验证）。只给 x/y 时走原坐标路径，行为完全不变。
 
 **每步输出状态**：`screenshot`（最新截图路径）+ `screen`（视口尺寸/整页尺寸/DPR/鼠标位置/滚动位置/当前焦点元素 active_element——你据此判断坐标和 Tab 导航结果）+ `screenshots_used/max`（成本计数）+ `api_hint`（官方 API 参数照抄即可拼请求：base64 内联、detail 等级、384 token 封顶）。失败指令（缺 x/y、缺 text、坏 JSON）只回错误 note 不消耗截图配额——页面没变不用重拍。`eval` 的结构化结果放 `eval_result` 字段（note 里是文本版）。启动 URL 打不开时**会话保活**（note 提示 startup url failed），直接发 `goto` 指令换 URL 即可，不用重开会话。页面发生跳转时初始状态带 `redirected_from` 告警。
 
