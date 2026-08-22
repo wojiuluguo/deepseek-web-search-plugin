@@ -196,6 +196,8 @@ deepseek-web-search-plugin/
 - No anti-bot approach is 100% reliable; browser emulation greatly reduces detection but strongly protected sites may still fail.
 - App-funnel pages (only app-store redirects, no real files) honestly report `app_only: true` — the site itself offers no web download; this is not a script defect.
 - **Vision mode (`--method vision`, headless browser session) is billed per screenshot and costs a nontrivial amount — not recommended for general users**; all other routes (search/download/text) are completely free.
+- ⚠️ **NOT recommended: driving Doubao's web UI to write documents with this tool** (tested the hard way!): login is hard, typing keeps hitting login walls, human-verification usually fails, and every attempt burns tokens — just have the AI write files locally instead.
+- ⚠️ **Douyin web login is effectively unusable via automation — don't force it** (tested the hard way!): ① SMS-code login — phone number/code entry all work, but the big "Login" button just can't be clicked (ironically the tiny corner logout button clicks fine); ② QR login — keeps timing out after scanning. The right way: `--profile --headed` manual login once (then headless forever), or `--login-rescue` to graft your everyday browser's login cookies.
 
 ## Development & Testing
 
