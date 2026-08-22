@@ -4,7 +4,7 @@ English | **[中文](README.zh-CN.md)**
 
 An [OpenClaw](https://github.com/openclaw) skill that gives DeepSeek real web search **and** an auto-save browser that downloads videos/audio/images/files from any webpage it opens — plus a vision mode for multimodal models (see a page, operate a page).
 
-> Current version **v1.21.0** (2026-08-23) · Author: user (Douyin ID: 94636651553) · [Changelog](#changelog)
+> Current version **v1.21.1** (2026-08-23) · Author: user (Douyin ID: 94636651553) · [Changelog](#changelog)
 
 <p align="center"><img src="assets/mascot.png" alt="deepseek-web-search mascot" width="220"></p>
 
@@ -179,7 +179,12 @@ deepseek-web-search-plugin/
     ├── cross_search.py      # Cross-validation / --mega mega search
     ├── search_and_cache.py  # Search + media auto-caching
     ├── own_search.py        # Local standalone search engine
-    ├── auto_save_browser.py # Auto-save browser (download core)
+    ├── auto_save_browser.py # Auto-save browser (download core, sole entry point)
+    ├── auto_save/           # Download-core module package (split in v1.21.1)
+    │   ├── constants.py     #   Constants: extensions/domain lists/safe-mode allowlists/UA pool
+    │   ├── ffmpeg.py        #   ffmpeg/ffprobe detection & decode verification
+    │   ├── cookies.py       #   Login state: cookie parsing/browser extraction/login rescue
+    │   └── urlrules.py      #   Pure URL/media/security classification functions
     └── verify_capture.py    # Capture verification
 ```
 
@@ -206,6 +211,15 @@ deepseek-web-search-plugin/
 - **Cost note**: Vision mode (`--method vision`, headless browser session) is billed per screenshot and costs a nontrivial amount — not recommended for general users; all other routes (search/download/text) are completely free
 
 ## Changelog
+
+### v1.21.1 (2026-08-23)
+
+Download-core modularization refactor (pure structural cleanup, zero functional change):
+
+- **`auto_save_browser.py` split by safety level into the `scripts/auto_save/` package**: batch 1 = constants / ffmpeg / cookies, batch 2 = urlrules (pure URL/media/security classification functions) — the main file slimmed from 4393 to ~4140 lines, all nine routes intact.
+- **Compatibility contract**: `auto_save_browser.py` remains the sole CLI entry point and the only module imported externally; every old name stays available via re-imports, so external call paths are unchanged.
+- **Pure-move verification**: AST node-by-node diff against the git HEAD original confirms all 29 extracted definitions are logic-identical; 162-case differential test shows old/new outputs identical for the same inputs; `__all__` re-exports added for 51 package-level names; text/direct/files routes verified end-to-end in a real browser, byte-identical to the original.
+- Side fix: restored a `List[Path]` type annotation drift from batch 1 (now literally identical to the original).
 
 ### v1.21.0 (2026-08-23)
 

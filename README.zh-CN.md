@@ -4,7 +4,7 @@
 
 OpenClaw Skill：让 DeepSeek 模型能搜索、会搜索、并且"该搜就搜"，还能自动下载网页里的视频/音频/图片/文件，多模态模型还能"看页面+操作页面"。
 
-> 当前版本 **v1.21.0**（2026-08-23）· 作者：user（抖音号: 94636651553）· [更新记录](#更新记录)
+> 当前版本 **v1.21.1**（2026-08-23）· 作者：user（抖音号: 94636651553）· [更新记录](#更新记录)
 
 <p align="center"><img src="assets/mascot.png" alt="deepseek-web-search 吉祥物" width="220"></p>
 
@@ -181,7 +181,12 @@ deepseek-web-search-plugin/
     ├── cross_search.py      # 交叉验证 / --mega 超大搜索
     ├── search_and_cache.py  # 搜索+自动缓存媒体
     ├── own_search.py        # 本地独立搜索引擎
-    ├── auto_save_browser.py # 保存型浏览器（下载核心）
+    ├── auto_save_browser.py # 保存型浏览器（下载核心，唯一入口）
+    ├── auto_save/           # 下载核心模块包（v1.21.1 拆分）
+    │   ├── constants.py     #   常量：扩展名/域名表/安全模式名单/UA 池
+    │   ├── ffmpeg.py        #   ffmpeg/ffprobe 探测与解码验证
+    │   ├── cookies.py       #   登录态：cookies 解析/浏览器提取/登录兜底
+    │   └── urlrules.py      #   URL/媒体/安全判定纯函数
     └── verify_capture.py    # 抓包产物校验
 ```
 
@@ -208,6 +213,15 @@ deepseek-web-search-plugin/
 - **费用提醒**：视觉模式（`--method vision` 无头浏览器会话）按截图付费，消费金额较大，一般用户不推荐使用；搜索/下载/抓正文等其他路线全部免费
 
 ## 更新记录
+
+### v1.21.1（2026-08-23）
+
+下载核心模块化重构（纯结构优化，零功能变化）：
+
+- **`auto_save_browser.py` 按安全等级分批拆出 `scripts/auto_save/` 包**：第 1 批 constants（常量）/ ffmpeg（探测验证）/ cookies（登录态），第 2 批 urlrules（URL/媒体/安全判定纯函数）——主文件从 4393 行瘦身到约 4140 行，仍保留全部九大路线
+- **兼容性契约**：`auto_save_browser.py` 仍是唯一命令行入口与唯一被外部 import 的模块，全部旧名经 re-import 保持可用，外部调用路径零变化
+- **纯搬迁验证**：AST 逐节点比对 git HEAD 原版确认 29 个拆出定义零逻辑改动；差分测试 162 项同输入新旧行为全等；`__all__` 补齐 51 个名字的包级导出；text/direct/files 三路线真浏览器端到端与原版逐字节一致
+- 顺手修复：第 1 批遗留的 `List[Path]` 类型注解偏差（恢复与原版逐字一致）
 
 ### v1.21.0（2026-08-23）
 

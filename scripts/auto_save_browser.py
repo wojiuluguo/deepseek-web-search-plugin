@@ -55,365 +55,36 @@ import urllib.request
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-STEALTH_JS = """
-Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-window.chrome = window.chrome || { runtime: {} };
-Object.defineProperty(navigator, 'plugins', {
-    get: () => [1, 2, 3, 4, 5]
-});
-Object.defineProperty(navigator, 'languages', {
-    get: () => ['zh-CN', 'zh', 'en']
-});
-"""
-
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
-]
-
-VIDEO_EXTS = {".mp4", ".webm", ".mov", ".m4v", ".m4s", ".mkv", ".avi", ".flv", ".ts"}
-AUDIO_EXTS = (".mp3", ".m4a", ".aac", ".wav", ".flac", ".ogg", ".wma")
-IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp")
-MEDIA_EXTENSIONS = VIDEO_EXTS | set(AUDIO_EXTS) | set(IMAGE_EXTS)
-
-CONTENT_TYPE_EXT = {
-    "video/mp4": ".mp4",
-    "video/webm": ".webm",
-    "video/quicktime": ".mov",
-    "video/x-m4v": ".m4v",
-    "video/x-matroska": ".mkv",
-    "video/mp2t": ".ts",
-    "audio/mpeg": ".mp3",
-    "audio/mp4": ".m4a",
-    "audio/aac": ".aac",
-    "audio/wav": ".wav",
-    "audio/x-wav": ".wav",
-    "audio/flac": ".flac",
-    "audio/ogg": ".ogg",
-    "image/jpeg": ".jpg",
-    "image/png": ".png",
-    "image/gif": ".gif",
-    "image/webp": ".webp",
-}
-
-VIDEO_LIKE_HOSTS = (
-    "douyin.com",
-    "iesdouyin.com",
-    "tiktok.com",
-    "bilibili.com",
-    "b23.tv",
-    "youtube.com",
-    "youtu.be",
-    "weibo.com",
-    "kuaishou.com",
-    "ixigua.com",
-    "xiaohongshu.com",
-    "xhslink.com",
+# ---- 拆分（v1.21.1 第 1 批，绝对安全级）：常量/ffmpeg/cookies 移入 auto_save 包 ----
+# 本文件仍是唯一命令行入口与唯一被外部 import 的模块；此处 re-import 保持全部旧名可用。
+from auto_save.constants import (
+    STEALTH_JS, USER_AGENTS, VIDEO_EXTS, AUDIO_EXTS, IMAGE_EXTS, MEDIA_EXTENSIONS,
+    CONTENT_TYPE_EXT, VIDEO_LIKE_HOSTS, IMAGE_LIKE_HOSTS, AUDIO_LIKE_HOSTS, FILE_EXTS,
+    PROFILE_DIR, SEARCH_REDIRECT_HOSTS, JUNK_EXTENSIONS, JUNK_URL_HINTS,
+    DANGEROUS_EXTS, MINING_DOMAINS, STRATUM_PORTS, SAFE_ALLOWED_EXTS, SAFE_MAX_FILE_BYTES,
 )
-
-# 图片电路：只有这些图片站/图片直链才值得导航过去收割
-IMAGE_LIKE_HOSTS = (
-    "image.baidu.com",
-    "pic.sogou.com",
-    "image.so.com",
-    "tuchong.com",
-    "huaban.com",
-    "pixabay.com",
-    "unsplash.com",
-    "pexels.com",
+from auto_save.ffmpeg import (
+    _find_tool, _ffmpeg_path, _ffprobe_path, _decoded_duration, _ffprobe_info, _probe_resolution,
 )
-
-# 音频电路：音乐平台/播客站
-AUDIO_LIKE_HOSTS = (
-    "music.163.com",
-    "y.qq.com",
-    "kuwo.cn",
-    "kugou.com",
-    "ximalaya.com",
-    "lizhi.fm",
-    "qingting.fm",
-    "soundcloud.com",
+from auto_save.cookies import (
+    _parse_netscape_cookies, _add_cookies_to_context, _browser_cookies_to_playwright,
+    _inject_login_cookies, _base_domain, _login_rescue,
 )
-
-# 文件电路：压缩包/文档/表格/演示/电子书/安装包/文本等一切非视频照片音频的东西
-FILE_EXTS = (
-    ".zip", ".rar", ".7z", ".tar", ".gz", ".bz2", ".xz",
-    ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
-    ".txt", ".csv", ".md", ".epub", ".mobi",
-    ".apk", ".msi", ".exe", ".iso", ".dmg",
-)
-
-# 持久化浏览器用户目录（--profile）：登录一次、cookie/缓存跨会话保留，等同真实浏览器的
-# 用户配置。注意：目录里存的是登录 cookie，绝不能进 git（.gitignore 已排除）。
-PROFILE_DIR = Path(__file__).resolve().parent.parent / "downloads" / "browser_profile"
-
-SEARCH_REDIRECT_HOSTS = (
-    "so.com",
-    "sogou.com",
-    "baidu.com",
-    "sm.cn",
-    "bing.com",
-    "cn.bing.com",
-    "quark.com",
+# ---- 拆分（v1.21.1 第 2 批，绝对安全级）：URL/媒体/安全判定纯函数移入 auto_save.urlrules ----
+from auto_save.urlrules import (
+    APP_STORE_HOSTS, SHELL_BODY_TEXT_LIMIT, CLICK_DOWNLOAD_FILE_TYPES, DOWNLOAD_BUTTON_TEXTS,
+    _decode_redirect_url, _is_media_url, _media_kind, _ext_from_content_type, _host_matches,
+    _safe_request_reason, _safe_save_reason, _is_junk_resource, _safe_filename,
+    _url_group_key, _extract_shell_redirect, _is_split_stream_fragment,
+    _filename_from_disposition, _is_app_store_url, _decode_scheme_target,
 )
 
 
-def _decode_redirect_url(url: str) -> str:
-    """Try to extract the real target URL from search-engine redirect links."""
-    try:
-        parsed = urllib.parse.urlparse(url)
-        host = parsed.netloc.lower()
-        if not any(_host_matches(host, rh) for rh in SEARCH_REDIRECT_HOSTS) and "link" not in parsed.path.lower():
-            return ""
-        query = urllib.parse.parse_qs(parsed.query)
-        for key in ("url", "target", "m", "q", "link", "redirect", "u", "to"):
-            vals = query.get(key)
-            if vals:
-                val = vals[0]
-                if val.startswith(("http://", "https://")):
-                    return val
-                decoded = urllib.parse.unquote(val)
-                if decoded.startswith(("http://", "https://")):
-                    return decoded
-    except Exception:
-        pass
-    return ""
+# （ffmpeg/ffprobe 探测与解码验证已移入 auto_save/ffmpeg.py）
 
+# （垃圾过滤/安全模式常量已移入 auto_save/constants.py）
 
-def _is_media_url(url: str, content_type: str) -> bool:
-    if url.startswith(("data:", "blob:")):
-        return False
-    ct = (content_type or "").lower()
-    if ct.startswith(("video/", "audio/", "image/")):
-        return True
-    path = urllib.parse.urlparse(url).path.lower()
-    ext = Path(path).suffix
-    return ext in MEDIA_EXTENSIONS
-
-
-def _media_kind(url: str, content_type: str) -> str:
-    """判定 URL/响应属于哪类媒体：video / audio / image，非媒体返回空串。"""
-    if url.startswith(("data:", "blob:")):
-        return ""
-    ct = (content_type or "").lower()
-    if ct.startswith("video/"):
-        return "video"
-    if ct.startswith("audio/"):
-        return "audio"
-    if ct.startswith("image/"):
-        return "image"
-    path = urllib.parse.urlparse(url).path.lower()
-    ext = Path(path).suffix
-    if ext in VIDEO_EXTS:
-        return "video"
-    if ext in AUDIO_EXTS:
-        return "audio"
-    if ext in IMAGE_EXTS:
-        return "image"
-    return ""
-
-
-def _ext_from_content_type(content_type: str) -> str:
-    ct = (content_type or "").lower().split(";")[0].strip()
-    return CONTENT_TYPE_EXT.get(ct, "")
-
-
-def _host_matches(host: str, domain: str) -> bool:
-    """域名精确匹配：host 等于 domain 或是其子域名。
-    修复子串匹配漏洞——"douyin.com" in "notdouyin.com" 为 True，
-    伪造前缀域名能骗过视频站一票否决/APP商店识别等全部域名判断。"""
-    h = (host or "").lower().strip()
-    d = (domain or "").lower().strip()
-    return h == d or h.endswith("." + d)
-
-
-# ---------- ffmpeg/ffprobe 校验工具 ----------
-# fMP4 抓包产物的 moov Duration 不可信（抖音 3.8MB 可标 95s 实际 31s），
-# 判断真实时长必须解码验证：ffmpeg -i x -f null - 解到尾，看最后的 time=。
-
-
-def _find_tool(name: str) -> Optional[str]:
-    """三保险找 ffmpeg/ffprobe：
-    1. 环境变量显式指定：FFMPEG_PATH / FFPROBE_PATH / FFMPEGPATH / FFMPEG_LOCATION
-       （yt-dlp 惯用 FFMPEG_LOCATION，一并认；可给 exe 全路径或所在目录）；
-    2. PATH（shutil.which）；
-    3. 常见安装位置扫描：winget/scoop/choco/ProgramFiles/C:\\ffmpeg/用户目录下 ffmpeg\\。
-    找到即缓存，进程内不重复找。"""
-    exe = f"{name}.exe" if os.name == "nt" else name
-    # 1. 显式环境变量（允许指向 exe 文件或其所在目录）
-    for var in (f"{name.upper()}_PATH", "FFMPEGPATH", "FFMPEG_LOCATION"):
-        v = os.environ.get(var, "").strip().strip('"')
-        if v:
-            p = Path(v)
-            if p.is_file():
-                # 必须文件名匹配：FFMPEGPATH 指向 ffmpeg.exe 时不能被当成 ffprobe
-                if p.name.lower() == exe.lower():
-                    return str(p)
-                continue
-            if p.is_dir():
-                cand = p / exe
-                if cand.is_file():
-                    return str(cand)
-    # 2. PATH
-    found = shutil.which(name)
-    if found:
-        return found
-    # 3. 常见安装位置（Windows 为主；用户手放 ffmpeg 目录没加 PATH 也能找到）
-    if os.name == "nt":
-        candidates: List[Path] = [
-            Path("C:\\ffmpeg") / f"{name}.exe",
-            Path("C:\\ffmpeg") / "bin" / f"{name}.exe",
-            Path.home() / "ffmpeg" / f"{name}.exe",            # 例 C:\Users\wqq\ffmpeg\ffmpeg.exe
-            Path.home() / "ffmpeg" / "bin" / f"{name}.exe",
-            Path.home() / "AppData" / "Local" / "ffmpeg" / "bin" / f"{name}.exe",
-            Path(os.environ.get("ProgramFiles", "C:\\Program Files")) / "ffmpeg" / "bin" / f"{name}.exe",
-            Path(os.environ.get("ProgramFiles(x86)", "C:\\Program Files (x86)")) / "ffmpeg" / "bin" / f"{name}.exe",
-            Path("C:\\ProgramData\\chocolatey\\bin") / f"{name}.exe",
-            Path.home() / "scoop" / "shims" / f"{name}.exe",
-        ]
-        # winget 安装：...\WinGet\Packages\*ffmpeg*\[子目录\]bin\
-        winget = Path.home() / "AppData" / "Local" / "Microsoft" / "WinGet" / "Packages"
-        if winget.is_dir():
-            for pkg in winget.glob("*[Ff][Ff]mpeg*"):
-                candidates.append(pkg / "bin" / f"{name}.exe")
-                candidates.append(pkg / f"{name}.exe")
-                try:
-                    for sub in pkg.iterdir():
-                        if sub.is_dir():
-                            candidates.append(sub / "bin" / f"{name}.exe")
-                            candidates.append(sub / f"{name}.exe")
-                except OSError:
-                    continue
-        for c in candidates:
-            try:
-                if c.is_file():
-                    return str(c)
-            except OSError:
-                continue
-    return None
-
-
-def _ffmpeg_path() -> Optional[str]:
-    if not hasattr(_ffmpeg_path, "_cache"):
-        _ffmpeg_path._cache = _find_tool("ffmpeg")
-    return _ffmpeg_path._cache
-
-
-def _ffprobe_path() -> Optional[str]:
-    if not hasattr(_ffprobe_path, "_cache"):
-        _ffprobe_path._cache = _find_tool("ffprobe")
-    return _ffprobe_path._cache
-
-
-def _decoded_duration(path) -> Optional[float]:
-    """解码验证真实时长。ffmpeg 全程解到 null，取最后 time=。
-    返回秒数；解码失败/无 ffmpeg 返回 None。"""
-    ffmpeg = _ffmpeg_path()
-    if not ffmpeg or not os.path.exists(path):
-        return None
-    try:
-        proc = subprocess.run(
-            [ffmpeg, "-hide_banner", "-nostats", "-i", str(path), "-f", "null", "-"],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="ignore",
-            timeout=180,
-        )
-        times = re.findall(r"time=(\d+):(\d+):(\d+(?:\.\d+)?)", proc.stderr)
-        if not times:
-            return None
-        h, m, s = times[-1]
-        return int(h) * 3600 + int(m) * 60 + float(s)
-    except Exception:
-        return None
-
-
-def _ffprobe_info(path) -> Optional[Dict]:
-    """ffprobe 拿流信息（分辨率/编码/标称时长）。失败返回 None。"""
-    ffprobe = _ffprobe_path()
-    if not ffprobe or not os.path.exists(path):
-        return None
-    try:
-        proc = subprocess.run(
-            [ffprobe, "-v", "quiet", "-print_format", "json", "-show_streams", "-show_format", str(path)],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="ignore",
-            timeout=60,
-        )
-        return json.loads(proc.stdout) if proc.stdout.strip() else None
-    except Exception:
-        return None
-
-
-def _probe_resolution(info: Optional[Dict]) -> Optional[Tuple[int, int]]:
-    if not info:
-        return None
-    for s in info.get("streams", []):
-        if s.get("codec_type") == "video" and s.get("width") and s.get("height"):
-            return (int(s["width"]), int(s["height"]))
-    return None
-
-
-# ---------- 垃圾资源过滤 ----------
-# 抓包会混入大量页面资源：UI 图、推荐位封面、gif、bin 残片。
-# 默认直接跳过不落盘；--save-junk 时存到 junk/ 子目录。
-
-JUNK_EXTENSIONS = {".gif", ".bin"}
-JUNK_URL_HINTS = (
-    "/static/", "/assets/", "/asset/", "/sprite", "/icon", "/emoji",
-    "/logo", "/avatar", "/widget", "/common/", "/public/",
-)
-
-# ---- 安全模式（--safe）：访问可疑站点时保护本机 ----
-# 可执行/安装包/脚本宏扩展名：导航命中即拦（页面自身的 .js 资源不拦，拦了网站全坏；
-# 恶意脚本靠域名黑名单 + 落盘白名单 + Chromium 进程沙箱兜底）。
-DANGEROUS_EXTS = {
-    ".exe", ".msi", ".msix", ".msp", ".scr", ".bat", ".cmd", ".com", ".pif",
-    ".ps1", ".psm1", ".vbs", ".vbe", ".jse", ".wsf", ".wsh", ".hta",
-    ".jar", ".cpl", ".reg", ".lnk", ".app", ".dmg", ".pkg", ".deb", ".rpm",
-    ".apk", ".appimage", ".sh", ".bash",
-}
-# 已知挖矿/矿池/恶意服务域名（含子域名匹配）
-MINING_DOMAINS = {
-    "coinhive.com", "authedmine.com", "cryptoloot.com", "crypto-loot.com",
-    "jsecoin.com", "minero.cc", "minergate.com", "deepminer.site",
-    "webminepool.com", "coinimp.com", "nanopool.org", "supportxmr.com",
-    "c3pool.com", "moneroocean.stream", "minexmr.com", "xmrpool.eu",
-    "nicehash.com", "2miners.com", "f2pool.com", "antpool.com",
-}
-# Stratum 挖矿协议常用端口（WebSocket/WebTransport 命中即拦）
-STRATUM_PORTS = (":3333", ":4444", ":5555", ":7777", ":8888")
-# 安全模式落盘扩展名白名单（媒体 + 文本产物），其余一律不落盘
-SAFE_ALLOWED_EXTS = MEDIA_EXTENSIONS | {".txt", ".json"}
-# 安全模式单文件大小上限（防磁盘填充）
-SAFE_MAX_FILE_BYTES = 2 * 1024 * 1024 * 1024
-
-
-def _safe_request_reason(url: str, resource_type: str) -> Optional[str]:
-    """安全模式请求裁决：返回拦截原因字符串，None 表示放行。"""
-    host = (urllib.parse.urlparse(url).hostname or "").lower()
-    if host and any(host == d or host.endswith("." + d) for d in MINING_DOMAINS):
-        return f"挖矿/恶意域名 {host}"
-    if resource_type == "websocket" and any(p in url for p in STRATUM_PORTS):
-        return f"矿池 Stratum 端口 {host}"
-    ext = Path(urllib.parse.urlparse(url).path).suffix.lower()
-    if ext in DANGEROUS_EXTS and resource_type in ("document", "other", ""):
-        return f"危险文件导航 {ext}"
-    return None
-
-
-def _safe_save_reason(filename: str, size: int) -> Optional[str]:
-    """安全模式落盘裁决：返回拒绝原因字符串，None 表示放行。"""
-    ext = Path(filename).suffix.lower()
-    if ext not in SAFE_ALLOWED_EXTS:
-        return f"非白名单扩展名 {ext or '(无扩展名)'}"
-    if size > SAFE_MAX_FILE_BYTES:
-        return f"超过 {SAFE_MAX_FILE_BYTES // (1024 * 1024)}MB 上限"
-    return None
+# （URL/媒体/安全判定纯函数已移入 auto_save/urlrules.py）
 
 
 def _setup_safe_mode(context, page) -> Dict[str, int]:
@@ -496,44 +167,6 @@ def _apply_stealth(context, mode: str) -> str:
         return "basic(fallback)"
 
 
-def _is_junk_resource(url: str, content_type: str, size: int, size_strict: bool = True) -> bool:
-    """判定垃圾资源。size_strict=False 时跳过尺寸阈值（图集收割场景：
-    用户点名要图，几十 KB 的正片图不是垃圾；只按扩展名/URL 关键词滤真图标）。"""
-    ct = (content_type or "").lower()
-    path = urllib.parse.urlparse(url).path.lower()
-    ext = Path(path).suffix
-    if ext in JUNK_EXTENSIONS:
-        return True
-    if any(h in url.lower() for h in JUNK_URL_HINTS):
-        return True
-    if not size_strict:
-        return False
-    # 小图片基本都是封面/图标，不是内容
-    if ct.startswith("image/") and size < 150 * 1024:
-        return True
-    if ext in (".jpg", ".jpeg", ".png", ".webp", ".bmp") and size < 150 * 1024:
-        return True
-    # 小音频残片（铃声/音效）
-    if ct.startswith("audio/") and 0 < size < 30 * 1024:
-        return True
-    return False
-
-
-def _safe_filename(url: str, content_type: str, index: int) -> str:
-    parsed = urllib.parse.urlparse(url)
-    base = os.path.basename(parsed.path)
-    ext = Path(base).suffix.lower()
-    if ext not in MEDIA_EXTENSIONS:
-        ext = _ext_from_content_type(content_type)
-    if not ext:
-        ext = ".bin"
-    stem = Path(base).stem[:80] if base and Path(base).stem else "media"
-    stem = re.sub(r'[\\/:*?"<>|]+', "_", stem).strip(" .")
-    if not stem:
-        stem = "media"
-    return f"{int(time.time())}_{index:03d}_{stem}{ext}"
-
-
 def _save_bytes(data: bytes, output_dir: Path, url: str, content_type: str, index: int) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     filename = _safe_filename(url, content_type, index)
@@ -542,144 +175,7 @@ def _save_bytes(data: bytes, output_dir: Path, url: str, content_type: str, inde
     return path
 
 
-def _parse_netscape_cookies(cookie_file: str):
-    """解析 Netscape cookies.txt（浏览器扩展导出的标准格式）→ Playwright add_cookies 列表。
-    返回 (cookies, error)：error 非 None 表示文件不可用（不存在/格式坏/没有有效行）。"""
-    p = Path(cookie_file)
-    if not p.is_file():
-        return None, f"cookies 文件不存在: {cookie_file}"
-    cookies = []
-    try:
-        for ln in p.read_text(encoding="utf-8-sig", errors="ignore").splitlines():
-            ln = ln.strip()
-            if not ln or ln.startswith("#") or ln.startswith("//"):
-                continue
-            parts = ln.split("\t")
-            if len(parts) != 7:
-                continue
-            domain, _, path_s, secure, expires, name, value = parts
-            try:
-                exp = int(expires)
-            except ValueError:
-                exp = -1
-            if not name:
-                continue
-            c = {
-                "name": name, "value": value,
-                "domain": domain if domain.startswith(".") else "." + domain,
-                "path": path_s or "/",
-                "secure": secure.upper() == "TRUE",
-            }
-            # expires=0/-1 → 会话 cookie，Playwright 用 -1 表示
-            c["expires"] = exp if exp > 0 else -1
-            cookies.append(c)
-    except Exception as exc:
-        return None, f"cookies 文件读取失败: {exc}"
-    if not cookies:
-        return None, "cookies 文件里没有有效行（需要 Netscape 格式，'Get cookies.txt' 扩展导出的就是）"
-    return cookies, None
-
-
-def _add_cookies_to_context(context, cookie_file: str):
-    """把 cookies.txt 注入浏览器上下文。返回 (True, n) 或 (False, error)。"""
-    cookies, err = _parse_netscape_cookies(cookie_file)
-    if err:
-        return False, err
-    try:
-        context.add_cookies(cookies)
-        return True, len(cookies)
-    except Exception as exc:
-        return False, f"cookie 注入失败: {exc}"
-
-
-def _browser_cookies_to_playwright(browser_name: str):
-    """读本机浏览器(chrome/edge/firefox)的登录 cookie → Playwright add_cookies 列表。
-    借道 yt-dlp 的 cookie 提取器（Playwright 自己没有读本机浏览器的 API——这正是
-    v1.13.x 里 --cookies-from-browser 在浏览器路线静默失效的根因）。
-    返回 (cookies, error)：error 非 None 表示读不到（未装 yt-dlp / 该浏览器没登录过 /
-    Chrome 新版应用级加密解不开），如实报错不装样子。"""
-    try:
-        from yt_dlp import cookies as ydl_cookies
-    except ImportError:
-        return None, "yt-dlp not installed（读浏览器 cookie 需要）"
-    try:
-        jar = ydl_cookies.extract_cookies_from_browser(browser_name)
-    except Exception as exc:
-        return None, f"读取 {browser_name} cookie 失败: {exc}"
-    cookies = []
-    for c in jar:
-        if not c.name:
-            continue
-        cookies.append({
-            "name": c.name,
-            "value": c.value or "",
-            "domain": c.domain if c.domain.startswith(".") else "." + c.domain,
-            "path": c.path or "/",
-            "secure": bool(c.secure),
-            "expires": float(c.expires) if c.expires else -1,  # 会话 cookie 用 -1
-        })
-    if not cookies:
-        return None, f"{browser_name} 里没读到 cookie（该浏览器登录过目标站点才会有）"
-    return cookies, None
-
-
-def _inject_login_cookies(context, cookie_file: str, cookies_from_browser: str, route_name: str):
-    """统一登录态注入：cookies.txt 文件优先，否则借道 yt-dlp 读本机浏览器。
-    供 browser/cache、harvest、vision 路线共用（此前只有 cookies.txt 一条腿）。"""
-    if cookie_file:
-        ok, info = _add_cookies_to_context(context, cookie_file)
-        sys.stderr.write(f"[cookies] {route_name} 注入{str(info) + ' 条' if ok else '失败: ' + str(info)}\n")
-        return info if ok else None
-    if cookies_from_browser:
-        cookies, err = _browser_cookies_to_playwright(cookies_from_browser)
-        if cookies:
-            try:
-                context.add_cookies(cookies)
-                sys.stderr.write(f"[cookies] {route_name} 已从 {cookies_from_browser} 注入 {len(cookies)} 条\n")
-                return len(cookies)
-            except Exception as exc:
-                sys.stderr.write(f"[cookies] {route_name} 注入失败: {exc}\n")
-                return None
-        sys.stderr.write(f"[cookies] {route_name} {err}\n")
-    return None
-
-
-def _base_domain(host: str) -> str:
-    """取主域（www.douyin.com → douyin.com）。简单两段启发式，
-    com.cn 类三段后缀会取窄一档，接种场景够用（宁可少注不错注）。"""
-    parts = (host or "").lower().strip(".").split(".")
-    return ".".join(parts[-2:]) if len(parts) >= 2 else (host or "")
-
-
-def _login_rescue(context, page, url: str) -> str:
-    """登录兜底（--login-rescue，v1.18.0）：扫码被风控拒发 session 的兜底——
-    自动遍历本机 chrome→edge→firefox，找到含目标域登录 cookie 的那个，
-    接种进当前上下文并刷新页面。人肉在自己浏览器登录目标站（天经地义），
-    工具只负责把登录态搬进来，绕开"自动化环境扫码不作数"的死锁。"""
-    host = (urllib.parse.urlparse(url).hostname or "").lower()
-    if not host:
-        return "login_rescue: URL 无域名，跳过"
-    base = _base_domain(host)
-    for browser in ("chrome", "edge", "firefox"):
-        cookies, err = _browser_cookies_to_playwright(browser)
-        if not cookies:
-            continue  # 该浏览器读不到/没登录过，试下一个
-        hit = [c for c in cookies if (c.get("domain") or "").lstrip(".").endswith(base)]
-        if not hit:
-            continue  # 有 cookie 但不含目标域
-        try:
-            context.add_cookies(hit)
-        except Exception as exc:
-            return f"login_rescue: {browser} cookie 注入失败: {exc}"
-        try:
-            page.reload(wait_until="domcontentloaded", timeout=30000)
-        except Exception:
-            pass
-        return f"login_rescue: 已从 {browser} 接种 {len(hit)} 条 {base} 登录 cookie 并刷新页面"
-    return ("login_rescue: 本机 chrome/edge/firefox 都没有目标站登录态"
-            "（先在自己平时的浏览器里登录一次目标站再试）")
-
-
+# （Netscape 解析/浏览器提取/登录接种/登录兜底已移入 auto_save/cookies.py）
 def _download_with_ytdlp(url: str, output_dir: Path, safe: bool = False,
                          cookie_file: str = "", cookies_from_browser: str = ""):
     """Try yt-dlp first. Returns (saved_list, error_string).
@@ -1110,18 +606,6 @@ def _auto_play_videos(page):
         pass
 
 
-def _url_group_key(url: str) -> str:
-    """分段分组键：scheme://host/目录路径。同一视频的分段共享目录前缀，
-    推荐位视频来自不同目录，靠这个把正片和垃圾分开。"""
-    try:
-        parsed = urllib.parse.urlparse(url)
-        path = parsed.path
-        directory = path.rsplit("/", 1)[0] if "/" in path else ""
-        return f"{parsed.netloc.lower()}{directory}"
-    except Exception:
-        return url
-
-
 def _merge_segments(saved: List[Dict], output_dir: Path, keep_segments: bool = False, safe: bool = False) -> Tuple[List[Dict], Dict]:
     """验证式合并：
     1. 只取 cache-segment，按 (扩展名, URL目录) 分组——正片/音频/推荐位天然分家；
@@ -1453,46 +937,6 @@ def _http_fetch_media(url: str, page_url: str = "", timeout: int = 20) -> Option
         return None
 
 
-def _extract_shell_redirect(html_text: str) -> Optional[str]:
-    """从跳转壳页 HTML 提取真实目标 URL（分享链接常见：api.xxx/share?link_id= 返回壳页）。
-    识别 meta refresh / JS location 跳转 / redirect 类 JSON 字段 / og:url。拿不到返回 None。"""
-    if not html_text:
-        return None
-    # meta refresh: <meta http-equiv="refresh" content="0;url=xxx">
-    m = re.search(
-        r'http-equiv=["\']?refresh["\']?[^>]*content=["\']?\d+;\s*url=([^"\'>\s]+)',
-        html_text, re.I,
-    )
-    if m:
-        return m.group(1).replace("&amp;", "&")
-    # JS 跳转: location.href='x' / location.replace("x")
-    m = re.search(r'location\.(?:href|replace)\s*[=(]\s*["\'](https?://[^"\']+)["\']', html_text)
-    if m:
-        return m.group(1).replace("&amp;", "&")
-    # redirect 类 JSON 字段（redirect_data/share 数据里常带真实链接）
-    for key in ("redirect", "redirect_url", "redirectUrl", "redirect_data",
-                "link_url", "linkUrl", "share_url", "shareUrl", "jump_url", "target_url", "web_url"):
-        m = re.search(key + r'["\']?\s*[:=]\s*["\'](https?://[^"\']+)["\']', html_text)
-        if m:
-            return m.group(1).replace("&amp;", "&")
-    # og:url / canonical
-    m = re.search(r'(?:property=["\']og:url["\']|rel=["\']canonical["\'])[^>]*(?:content|href)=["\'](https?://[^"\']+)["\']', html_text, re.I)
-    if not m:
-        m = re.search(r'(?:content|href)=["\'](https?://[^"\']+)["\'][^>]*(?:property=["\']og:url["\']|rel=["\']canonical["\'])', html_text, re.I)
-    if m:
-        return m.group(1).replace("&amp;", "&")
-    return None
-
-
-def _is_split_stream_fragment(url: str) -> bool:
-    """m4s/ts 是视频站 MSE 分离流分段（视频轨/音频轨拆成两条流）。
-    单独抓一条就是"只有画面没声音/只有声音没画面"的残件。"""
-    return urllib.parse.urlparse((url or "").split("?")[0]).path.lower().endswith((".m4s", ".ts"))
-
-
-SHELL_BODY_TEXT_LIMIT = 600  # 正文短于这个数且带跳转标记 → 判为落地页壳页
-
-
 def _goto_pierce_shell(page, url: str, max_hops: int = 3) -> str:
     """落地页穿透（Landing Page Bypass）：调用方 goto 后，若当前页是壳页
     （正文极短 + 带跳转标记 meta refresh/JS 跳转/redirect_data/og:url），
@@ -1788,30 +1232,6 @@ FILE_LINKS_JS = """
 """
 
 
-def _filename_from_disposition(resp, url: str) -> str:
-    """从 Content-Disposition 提取文件名（支持 filename*=UTF-8'' 和 filename="），
-    拿不到就用 URL 最后一段。"""
-    cd = ""
-    try:
-        cd = resp.headers.get("Content-Disposition", "") or ""
-    except Exception:
-        pass
-    if cd:
-        m = re.search(r"filename\*=UTF-8''([^;]+)", cd, re.I)
-        if m:
-            try:
-                return urllib.parse.unquote(m.group(1).strip().strip('"'))
-            except Exception:
-                pass
-        m = re.search(r'filename="?([^";]+)"?', cd, re.I)
-        if m:
-            name = m.group(1).strip()
-            if name:
-                return name
-    base = os.path.basename(urllib.parse.urlparse(url).path) or "file"
-    return base
-
-
 def _file_direct_download(url: str, dest_dir: Path, safe: bool = False, referer: str = "") -> Optional[Dict]:
     """HTTP 流式直链下载（8MB 分块，不吃内存）。返回 saved 条目或 None（失败/是网页）。"""
     req = urllib.request.Request(url, headers={
@@ -1873,70 +1293,6 @@ def _zip_bundle(folder: Path, output_dir: Path) -> Optional[str]:
         for p in files:
             zf.write(p, p.relative_to(folder))
     return str(bundle)
-
-
-# ---------- 点击式下载兜底（--click-download，默认关闭）----------
-# 场景：分享页"点击下载"按钮跳转 APP/JS 处理，页面里没有文件直链。
-# 策略（按序）：UA 伪装重试 → 找下载按钮点击 + 网络层嗅探真文件响应
-# （Content-Type 是文件本体/URL 以文件扩展名结尾）→ expect_download 兜底
-# → scheme 参数解码。抓到真 URL 后 HTTP 流式直下。
-
-CLICK_DOWNLOAD_FILE_TYPES = (
-    "application/vnd.android.package-archive",  # APK
-    "application/zip", "application/x-zip-compressed",
-    "application/x-rar-compressed", "application/vnd.rar",
-    "application/x-7z-compressed",
-    "application/pdf",
-    "application/msword",
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    "application/vnd.ms-excel",
-    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    "application/vnd.ms-powerpoint",
-    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-    "application/octet-stream",  # 通用二进制（很多站用它发 APK/zip）
-)
-
-DOWNLOAD_BUTTON_TEXTS = ("下载", "立即下载", "点击下载", "免费下载", "安装",
-                         "download", "get apk", "get the app", "install")
-
-# APP 商店域名：抓到这些链接说明是"引流装APP"陷阱——按钮抓到的"下载链接"
-# 其实是下载那个 APP 本身（跳应用商店），不是用户要的文件。绝不存为成果。
-APP_STORE_HOSTS = (
-    "apps.apple.com", "appstore.com", "itunes.apple.com",
-    "play.google.com", "market.android.com",
-    "app.mi.com", "appgallery.huawei.com", "appgallery.cloud.huawei.com",
-    "myapp.com", "android.myapp.com",
-    "app.baidu.com", "shouji.baidu.com",
-    "zhushou.360.cn", "app.360.cn",
-    "wandoujia.com", "ppzhushou.com", "25pp.com",
-    "appgallery", "samsungapps.com",
-    "appgallery.market.xiaomi.com",
-)
-
-
-def _is_app_store_url(url: str) -> bool:
-    """判定 URL 是否 APP 商店/引流装APP页面。"""
-    host = urllib.parse.urlparse(url).netloc.lower()
-    return any(_host_matches(host, h) for h in APP_STORE_HOSTS)
-
-
-def _decode_scheme_target(href: str) -> str:
-    """从 scheme 跳转链接里解出真 URL（theirapp://dl?url=https%3A%2F%2F...）。
-    解不出 https 目标就返回空串。"""
-    if not href or "://" not in href:
-        return ""
-    try:
-        qs = urllib.parse.urlparse(href).query or href.split("?", 1)[-1]
-        params = urllib.parse.parse_qs(qs, keep_blank_values=True)
-    except Exception:
-        return ""
-    for key in ("url", "download", "download_url", "downloadUrl", "link", "target", "redirect"):
-        if key in params:
-            cand = params[key][0]
-            cand = urllib.parse.unquote(cand)
-            if cand.startswith(("http://", "https://")):
-                return cand
-    return ""
 
 
 def _try_click_download(page, url: str, output_dir: Path, safe: bool = False) -> tuple:

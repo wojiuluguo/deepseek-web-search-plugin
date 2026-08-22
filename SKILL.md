@@ -1,7 +1,7 @@
 ---
 name: deepseek-web-search
 description: DeepSeek 联网搜索技能。遇到实时信息、事实核查、新闻、价格、代码报错、未知名词或用户说“搜一下”时，必须使用本技能搜索并附来源。
-version: 1.21.0
+version: 1.21.1
 updated: 2026-08-23
 author: user（抖音号: 94636651553）
 license: MIT
@@ -438,6 +438,7 @@ python "{baseDir}/scripts/search_browser.py" --query "transformer" --category ac
 
 - **开发助手**：代码由 **智谱 5.3**（GLM）编写与维护
 - **测试 AI**：视觉会话等能力由 **MiniMax M3** 与 **DeepSeek 多模态模型**（deepseek-v4-flash-vision-exp）两个模型交叉实测
+- **代码结构（v1.21.1 模块化）**：`auto_save_browser.py` 下载核心已按安全等级分批拆出 `scripts/auto_save/` 包（constants 常量 / ffmpeg 探测验证 / cookies 登录态 / urlrules URL·媒体·安全判定纯函数）——主文件仍是唯一命令行入口，外部 import 路径零变化，拆分经 AST 逐节点比对 + 差分测试确认零逻辑改动
 - 详见项目文章 [ARTICLE.md](ARTICLE.md)
 
 ## 失败兜底
