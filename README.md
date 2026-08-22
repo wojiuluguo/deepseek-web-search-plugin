@@ -195,6 +195,7 @@ deepseek-web-search-plugin/
 - Bilibili m4s segmented streams and some blob/MSE videos can't be reassembled from browser cache alone; the script auto-falls back to yt-dlp.
 - No anti-bot approach is 100% reliable; browser emulation greatly reduces detection but strongly protected sites may still fail.
 - App-funnel pages (only app-store redirects, no real files) honestly report `app_only: true` — the site itself offers no web download; this is not a script defect.
+- **Vision mode (`--method vision`, headless browser session) is billed per screenshot and costs a nontrivial amount — not recommended for general users**; all other routes (search/download/text) are completely free.
 
 ## Changelog
 
