@@ -4,7 +4,7 @@ English | **[中文](README.zh-CN.md)**
 
 An [OpenClaw](https://github.com/openclaw) skill that gives DeepSeek real web search **and** an auto-save browser that downloads videos/audio/images/files from any webpage it opens — plus a vision mode for multimodal models (see a page, operate a page).
 
-> Current version **v1.13.1** (2026-08-22) · Author: user · [Changelog](#changelog)
+> Current version **v1.14.2** (2026-08-22) · Author: user · [Changelog](#changelog)
 
 <p align="center"><img src="assets/mascot.png" alt="deepseek-web-search mascot" width="220"></p>
 
@@ -197,6 +197,37 @@ deepseek-web-search-plugin/
 - App-funnel pages (only app-store redirects, no real files) honestly report `app_only: true` — the site itself offers no web download; this is not a script defect.
 
 ## Changelog
+
+### v1.14.2 (2026-08-22)
+
+Captcha detection off by default (real-world feedback: false positives froze all operations):
+
+- **`--captcha-mode` default flipped from `detect` to `off`**: no more per-step detection or `captcha_detected` output — normal pages (carousels/icon classes) used to be falsely flagged, and downstream AI would halt on sight, freezing typing/clicking/dragging. Detection stays available via explicit `--captcha-mode detect`.
+- Note: terminal "echo" is standard TTY input display, not tool output (the tool's stdout is a clean JSON state stream); for manual operation use the `--headed` real window.
+
+### v1.14.1 (2026-08-22)
+
+Vision-session robustness (5 tool-level issues from real-world feedback):
+
+- **Fix captcha false positives**: tightened detection selectors — bare `.slider` (image carousels) and `[class*="rotate"]` (Tailwind rotate-\* icons) no longer misreported as slider/rotate captchas; dropped the "向右滑动" keyword (standard carousel hint text). Normal pages used to trigger `captcha_detected`, making downstream AI halt.
+- **New `--captcha-mode allow`**: disables captcha detection entirely (for pages that actually work fine while detection keeps misfiring).
+- **New `--linger`**: session end (AI disconnect/quit/EOF) no longer closes the browser instantly — `--headed` window is kept for the human to close manually (1h cap); headless gets a 30s grace. A crashed AI script no longer kills the browser session.
+- **New `--idle-timeout N`**: configurable idle watchdog (default 120s; auto-relaxed to 600s in `--headed` mode so QR-scan/manual interaction isn't killed; 0=off, only total timeout applies).
+- Tolerant cleanup when the persistent-context window is manually closed; captcha handoff guidance updated to `--headed --profile` (login state preserved).
+- Note: the stdin/stdout protocol is designed for programmatic pipes; typing manually in a TTY mixes terminal echo (not a bug — documented; manual scenarios should use `--headed`).
+
+### v1.14.0 (2026-08-22)
+
+Persistent login + a batch of security/functional fixes:
+
+- **New `--profile [dir]` persistent browser user-data dir**: log in once, stay logged in across sessions (Doubao/Douyin/Bilibili web and other login-walled sites) — cookies/cache/login state persist like a real browser. First login: `--method vision --profile --headed` (human scans QR), then headless with `--profile`. The dir holds login cookies (gitignored).
+- **Fix: `--cookies-from-browser` only worked in the yt-dlp route** — browser/cache/harvest/vision routes silently ignored it (Playwright has no API to read host-browser cookies). Now extracted via yt-dlp's cookie extractor and injected; honest error when unreadable.
+- **Fix: browser-route's internal yt-dlp fallback dropped cookies** (explicit `--method browser --cookies` degraded without login state); chain's harvest step also missed passing cookies.
+- **Fix: safe-mode 2GB cap holes** — files-route streaming download and click-download never checked size (disk-fill risk); now abort+delete mid-stream over the cap, native downloads re-checked after save.
+- **Fix: substring domain matching** (`notdouyin.com` matched `douyin.com`) → exact domain/subdomain matching everywhere.
+- **Fix: harvest permanently blacklisted transiently-failed URLs** (one timeout = never retried, lazy galleries lost images) → retry up to 2 times across scroll rounds.
+- **Fix: vision session lost safe-mode popup blocking after page rebuild**; startup URL failure no longer wastes screenshot budget on a blank page.
+- Search: CJK precision ranking fixed (whole-sentence glue → bigram terms); search_browser now ignores self-signed certs (aligned with other routes); network sniffing skips >1GB responses and same-path-different-query files are no longer wrongly deduped (true duplicates cut by content hash).
 
 ### v1.13.1 (2026-08-22)
 

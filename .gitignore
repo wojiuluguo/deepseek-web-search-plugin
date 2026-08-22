@@ -7,6 +7,9 @@ __pycache__/
 index/*.db
 downloads/cache/*
 !downloads/cache/.gitkeep
+# 持久化浏览器用户目录（--profile，含登录 cookie，绝不提交）
+downloads/browser_profile/
+downloads/safe/
 
 # 临时/测试
 scripts/_tmp*

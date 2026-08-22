@@ -41,6 +41,7 @@ DeepSeek Auto-Save Browser — 自创“保存型浏览器/保存型搜索引擎
 """
 
 import argparse
+import hashlib
 import json
 import os
 import random
@@ -143,6 +144,10 @@ FILE_EXTS = (
     ".apk", ".msi", ".exe", ".iso", ".dmg",
 )
 
+# 持久化浏览器用户目录（--profile）：登录一次、cookie/缓存跨会话保留，等同真实浏览器的
+# 用户配置。注意：目录里存的是登录 cookie，绝不能进 git（.gitignore 已排除）。
+PROFILE_DIR = Path(__file__).resolve().parent.parent / "downloads" / "browser_profile"
+
 SEARCH_REDIRECT_HOSTS = (
     "so.com",
     "sogou.com",
@@ -158,7 +163,8 @@ def _decode_redirect_url(url: str) -> str:
     """Try to extract the real target URL from search-engine redirect links."""
     try:
         parsed = urllib.parse.urlparse(url)
-        if parsed.netloc.lower() not in SEARCH_REDIRECT_HOSTS and "link" not in parsed.path.lower():
+        host = parsed.netloc.lower()
+        if not any(_host_matches(host, rh) for rh in SEARCH_REDIRECT_HOSTS) and "link" not in parsed.path.lower():
             return ""
         query = urllib.parse.parse_qs(parsed.query)
         for key in ("url", "target", "m", "q", "link", "redirect", "u", "to"):
@@ -211,6 +217,15 @@ def _media_kind(url: str, content_type: str) -> str:
 def _ext_from_content_type(content_type: str) -> str:
     ct = (content_type or "").lower().split(";")[0].strip()
     return CONTENT_TYPE_EXT.get(ct, "")
+
+
+def _host_matches(host: str, domain: str) -> bool:
+    """域名精确匹配：host 等于 domain 或是其子域名。
+    修复子串匹配漏洞——"douyin.com" in "notdouyin.com" 为 True，
+    伪造前缀域名能骗过视频站一票否决/APP商店识别等全部域名判断。"""
+    h = (host or "").lower().strip()
+    d = (domain or "").lower().strip()
+    return h == d or h.endswith("." + d)
 
 
 # ---------- ffmpeg/ffprobe 校验工具 ----------
@@ -539,6 +554,58 @@ def _add_cookies_to_context(context, cookie_file: str):
         return False, f"cookie 注入失败: {exc}"
 
 
+def _browser_cookies_to_playwright(browser_name: str):
+    """读本机浏览器(chrome/edge/firefox)的登录 cookie → Playwright add_cookies 列表。
+    借道 yt-dlp 的 cookie 提取器（Playwright 自己没有读本机浏览器的 API——这正是
+    v1.13.x 里 --cookies-from-browser 在浏览器路线静默失效的根因）。
+    返回 (cookies, error)：error 非 None 表示读不到（未装 yt-dlp / 该浏览器没登录过 /
+    Chrome 新版应用级加密解不开），如实报错不装样子。"""
+    try:
+        from yt_dlp import cookies as ydl_cookies
+    except ImportError:
+        return None, "yt-dlp not installed（读浏览器 cookie 需要）"
+    try:
+        jar = ydl_cookies.extract_cookies_from_browser(browser_name)
+    except Exception as exc:
+        return None, f"读取 {browser_name} cookie 失败: {exc}"
+    cookies = []
+    for c in jar:
+        if not c.name:
+            continue
+        cookies.append({
+            "name": c.name,
+            "value": c.value or "",
+            "domain": c.domain if c.domain.startswith(".") else "." + c.domain,
+            "path": c.path or "/",
+            "secure": bool(c.secure),
+            "expires": float(c.expires) if c.expires else -1,  # 会话 cookie 用 -1
+        })
+    if not cookies:
+        return None, f"{browser_name} 里没读到 cookie（该浏览器登录过目标站点才会有）"
+    return cookies, None
+
+
+def _inject_login_cookies(context, cookie_file: str, cookies_from_browser: str, route_name: str):
+    """统一登录态注入：cookies.txt 文件优先，否则借道 yt-dlp 读本机浏览器。
+    供 browser/cache、harvest、vision 路线共用（此前只有 cookies.txt 一条腿）。"""
+    if cookie_file:
+        ok, info = _add_cookies_to_context(context, cookie_file)
+        sys.stderr.write(f"[cookies] {route_name} 注入{str(info) + ' 条' if ok else '失败: ' + str(info)}\n")
+        return info if ok else None
+    if cookies_from_browser:
+        cookies, err = _browser_cookies_to_playwright(cookies_from_browser)
+        if cookies:
+            try:
+                context.add_cookies(cookies)
+                sys.stderr.write(f"[cookies] {route_name} 已从 {cookies_from_browser} 注入 {len(cookies)} 条\n")
+                return len(cookies)
+            except Exception as exc:
+                sys.stderr.write(f"[cookies] {route_name} 注入失败: {exc}\n")
+                return None
+        sys.stderr.write(f"[cookies] {route_name} {err}\n")
+    return None
+
+
 def _download_with_ytdlp(url: str, output_dir: Path, safe: bool = False,
                          cookie_file: str = "", cookies_from_browser: str = ""):
     """Try yt-dlp first. Returns (saved_list, error_string).
@@ -716,7 +783,7 @@ def _pick_video_url(results: List[Dict[str, str]], query: str = "") -> str:
             if not url:
                 continue
             for cand in (_decode_redirect_url(url), url):
-                if cand and any(h in _host_of(cand) for h in preferred):
+                if cand and any(_host_matches(_host_of(cand), h) for h in preferred):
                     return cand
     # 第二轮（无偏好或首选平台无结果）：第一个视频类链接
     for r in results:
@@ -729,11 +796,11 @@ def _pick_video_url(results: List[Dict[str, str]], query: str = "") -> str:
             if not cand:
                 continue
             host = _host_of(cand)
-            if any(vh in host for vh in VIDEO_LIKE_HOSTS):
+            if any(_host_matches(host, vh) for vh in VIDEO_LIKE_HOSTS):
                 return cand
         # Search-engine redirect links are acceptable too: the browser can follow them.
         host = _host_of(url)
-        if any(rh in host for rh in SEARCH_REDIRECT_HOSTS):
+        if any(_host_matches(host, rh) for rh in SEARCH_REDIRECT_HOSTS):
             return url
     return ""
 
@@ -769,7 +836,7 @@ def _detect_url_media_type(url: str, media_types: str = "") -> str:
     host = parsed.netloc.lower()
     path = parsed.path.lower()
     # 第一优先：视频站域名。无论 --media-type 怎么单选，视频页永远走视频路。
-    if any(vh in host for vh in VIDEO_LIKE_HOSTS):
+    if any(_host_matches(host, vh) for vh in VIDEO_LIKE_HOSTS):
         return "video"
     types = [t.strip() for t in re.split(r"[,，]", (media_types or "").strip()) if t.strip()]
     if len(types) == 1 and types[0] in ("video", "audio", "image", "file", "text"):
@@ -780,9 +847,9 @@ def _detect_url_media_type(url: str, media_types: str = "") -> str:
         return "audio"
     if path.endswith(FILE_EXTS):
         return "file"
-    if any(h in host for h in IMAGE_LIKE_HOSTS):
+    if any(_host_matches(host, h) for h in IMAGE_LIKE_HOSTS):
         return "image"
-    if any(h in host for h in AUDIO_LIKE_HOSTS):
+    if any(_host_matches(host, h) for h in AUDIO_LIKE_HOSTS):
         return "audio"
     return "video"
 
@@ -836,16 +903,16 @@ def _pick_media_url(results: List[Dict[str, str]], query: str, media_type: str =
                 continue
             cand = _decode_redirect_url(url) or url
             host = _host_of(cand)
-            if any(vh in host for vh in VIDEO_LIKE_HOSTS):
+            if any(_host_matches(host, vh) for vh in VIDEO_LIKE_HOSTS):
                 continue
-            if any(h in host for h in IMAGE_LIKE_HOSTS) or any(h in host for h in AUDIO_LIKE_HOSTS):
+            if any(_host_matches(host, h) for h in IMAGE_LIKE_HOSTS) or any(_host_matches(host, h) for h in AUDIO_LIKE_HOSTS):
                 continue
             # 文件直链（zip/pdf 等）是 file 电路的目标，文本电路跳过
             if urllib.parse.urlparse(cand).path.lower().endswith(FILE_EXTS):
                 continue
             if not fallback:
                 fallback = cand
-            if cand == url and any(rh in host for rh in SEARCH_REDIRECT_HOSTS):
+            if cand == url and any(_host_matches(host, rh) for rh in SEARCH_REDIRECT_HOSTS):
                 continue
             return cand
         return fallback
@@ -863,7 +930,7 @@ def _pick_media_url(results: List[Dict[str, str]], query: str, media_type: str =
         for cand in (_decode_redirect_url(url), url):
             if not cand:
                 continue
-            if any(h in _host_of(cand) for h in hosts):
+            if any(_host_matches(_host_of(cand), h) for h in hosts):
                 return cand
             if urllib.parse.urlparse(cand).path.lower().endswith(exts):
                 return cand
@@ -1432,6 +1499,7 @@ def _harvest_lazy_all(page, url: str, output_dir: Path, allowed_kinds: set, seen
     收敛条件（满足其一）：滚到底且本轮无新增 / 连续 stall_limit 轮无新增 / 达轮数上限。
     每轮收割增量入库（seen 去重防重复下载），总收录 max_total 封顶防失控。"""
     saved_all: List[Dict] = []
+    fail_counts: Dict = {}  # URL→失败次数：瞬时失败跨轮重试（最多2次）
     stall = 0
     for _ in range(max_rounds):
         if len(saved_all) >= max_total:
@@ -1439,7 +1507,7 @@ def _harvest_lazy_all(page, url: str, output_dir: Path, allowed_kinds: set, seen
         _trigger_lazy_media(page)
         batch = _harvest_dom_media(page, url, output_dir, allowed_kinds, seen,
                                    save_junk, limit=min(120, max_total - len(saved_all)),
-                                   safe=safe)
+                                   safe=safe, fail_counts=fail_counts)
         saved_all.extend(batch)
         stall = 0 if batch else stall + 1
         # 逐段滚动：模拟人翻页，让各段图片依次进入视口触发懒加载
@@ -1465,7 +1533,7 @@ def _harvest_lazy_all(page, url: str, output_dir: Path, allowed_kinds: set, seen
         _trigger_lazy_media(page)
         tail = _harvest_dom_media(page, url, output_dir, allowed_kinds, seen,
                                   save_junk, limit=min(120, max(0, max_total - len(saved_all))),
-                                  safe=safe)
+                                  safe=safe, fail_counts=fail_counts)
         saved_all.extend(tail)
         page.evaluate("window.scrollTo(0, 0)")
     except Exception:
@@ -1475,11 +1543,16 @@ def _harvest_lazy_all(page, url: str, output_dir: Path, allowed_kinds: set, seen
 
 def _harvest_dom_media(
     page, url: str, output_dir: Path, allowed_kinds: set, seen: set, save_junk: bool,
-    limit: int = 40, safe: bool = False,
+    limit: int = 40, safe: bool = False, fail_counts: Optional[dict] = None,
 ) -> List[Dict]:
     """收集页面里所有媒体 URL（DOM/元数据/内嵌JSON），用页面上下文逐个下载。
-    与网络嗅探互补：嗅探抓"浏览器请求过的"，收割抓"页面上存在但可能没请求/请求被拦的"。"""
+    与网络嗅探互补：嗅探抓"浏览器请求过的"，收割抓"页面上存在但可能没请求/请求被拦的"。
+    fail_counts：URL→失败次数。瞬时失败（超时/被拦）不进 seen，跨轮还有机会重试
+    （旧逻辑一次失败永久拉黑，迭代滚动收割后续轮次全跳过——漏图）；最多重试 2 次。"""
     import base64
+
+    if fail_counts is None:
+        fail_counts = {}
 
     candidates: List[Dict] = []
     try:
@@ -1520,14 +1593,20 @@ def _harvest_dom_media(
             continue
         if u in seen or u.split("?")[0] in seen:
             continue
-        seen.add(u)
+        # 网络嗅探已存过的同路径资源也别重收（seen 里现在存完整 URL，带 query）
+        if any(s.split("?")[0] == u.split("?")[0] for s in seen):
+            continue
+        if fail_counts.get(u, 0) >= 2:
+            continue  # 连败 2 次：真死链/真被拦，不再每轮空耗
         item = _page_fetch(page, u)
         if not item:
             # 页面 fetch 被拦（跨域 CDN 无 CORS 头，如小黑盒 cdn.max-c.com）→
             # 降级脚本侧直连：带浏览器 UA + 页面 Referer，公开 CDN 基本都放行
             item = _http_fetch_media(u, page_url=url)
         if not item:
-            continue
+            fail_counts[u] = fail_counts.get(u, 0) + 1
+            continue  # 瞬时失败不进 seen：下一轮滚动收割还有机会重试
+        seen.add(u)
         data = base64.b64decode(item["b64"])
         if len(data) < 2048:
             continue
@@ -1661,13 +1740,23 @@ def _file_direct_download(url: str, dest_dir: Path, safe: bool = False, referer:
             dest_dir.mkdir(parents=True, exist_ok=True)
             path = dest_dir / fname
             size = 0
+            over_limit = False
             with open(path, "wb") as f:
                 while True:
                     chunk = resp.read(8 * 1024 * 1024)
                     if not chunk:
                         break
-                    f.write(chunk)
                     size += len(chunk)
+                    # 安全模式 2GB 上限必须在流式过程中执行（预检 content-length
+                    # 可伪造/缺失；此前边下边写不查大小，恶意大文件能写满磁盘）
+                    if safe and size > SAFE_MAX_FILE_BYTES:
+                        over_limit = True
+                        break
+                    f.write(chunk)
+            if over_limit:
+                path.unlink(missing_ok=True)
+                sys.stderr.write(f"[safe-block] 文件超过2GB上限，已中断删除: {url[:120]}\n")
+                return None
             if size < 64:
                 path.unlink(missing_ok=True)
                 return None
@@ -1734,7 +1823,7 @@ APP_STORE_HOSTS = (
 def _is_app_store_url(url: str) -> bool:
     """判定 URL 是否 APP 商店/引流装APP页面。"""
     host = urllib.parse.urlparse(url).netloc.lower()
-    return any(h in host for h in APP_STORE_HOSTS)
+    return any(_host_matches(host, h) for h in APP_STORE_HOSTS)
 
 
 def _decode_scheme_target(href: str) -> str:
@@ -1946,6 +2035,11 @@ def _try_click_download(page, url: str, output_dir: Path, safe: bool = False) ->
                 dest = output_dir / f"{Path(fname).stem}_{seq}{Path(fname).suffix}"
                 seq += 1
             dl.save_as(str(dest))
+            # safe 落盘后大小复核（对齐浏览器 on_download 的防护，堵 2GB 漏洞）
+            if safe and dest.exists() and dest.stat().st_size > SAFE_MAX_FILE_BYTES:
+                dest.unlink()
+                sys.stderr.write("[safe-block] 下载拒绝: 超过大小上限，已删除\n")
+                continue
             saved.append({"url": getattr(dl, "url", "") or "browser-download",
                           "path": str(dest), "size": dest.stat().st_size,
                           "kind": "file", "via": "click-route3-download-event"})
@@ -2264,16 +2358,19 @@ ELEMENTS_JS = """
 
 # 验证码检测 JS：识别常见验证码特征（geetest/recaptcha/hCaptcha/国内滑块/点选）。
 # 检测到只上报不绕过——自动破解验证码违法且违反站点条款，正确姿势是人工接管。
+# 选择器必须收着写（v1.14.1 教训）：裸 .slider 命中轮播图、[class*="rotate"] 命中
+# Tailwind rotate-* 图标——普通页全被误报"验证码"，AI 一看 captcha_detected 就停手。
 CAPTCHA_JS = """
 () => {
     const found = [];
-    // 1. 已知验证码 iframe / class / id 特征
+    // 1. 已知验证码 iframe / class / id 特征（只留验证码专属选择器）
     const sigs = {
         geetest: ['.geetest_holder', '.geetest_widget', 'iframe[src*="geetest"]'],
         recaptcha: ['.recaptcha-checkbox', 'iframe[src*="recaptcha"]', '.g-recaptcha'],
         hcaptcha: ['iframe[src*="hcaptcha"]', '.h-captcha'],
-        slider: ['.slider', '.slide-verify', '.nc_wrapper', '[class*="captcha"]'],
-        rotate: ['.rotate-captcha', '[class*="rotate"]'],
+        slider: ['.slide-verify', '.nc_wrapper', '.geetest_slider',
+                 '[class*="slide-verify"]', '[class*="captcha-slider"]', '[class*="captcha"]'],
+        rotate: ['.rotate-captcha', '[class*="rotate-captcha"]'],
     };
     for (const [kind, sels] of Object.entries(sigs)) {
         for (const s of sels) {
@@ -2286,9 +2383,9 @@ CAPTCHA_JS = """
             } catch (e) {}
         }
     }
-    // 2. 验证码关键词（中文站点常见文案）
+    // 2. 验证码关键词（中文站点常见文案；不含"向右滑动"——那是轮播图的标准指示文案）
     const body = (document.body ? document.body.innerText : '').slice(0, 20000);
-    if (/请拖动滑块|拖动滑块完成|向右滑动|拖动到最右侧|点击验证|请点击图中|按顺序点击/.test(body)) {
+    if (/请拖动滑块|拖动滑块完成|拖动到最右侧|点击验证|请点击图中|按顺序点击/.test(body)) {
         found.push('slider_or_click_captcha');
     }
     return [...new Set(found)];
@@ -2467,7 +2564,12 @@ def _vision_route(url: str, output_dir: Path, headed: bool = False, safe: bool =
                   max_screens: int = VISION_DEFAULT_MAX_SCREENS,
                   detail: str = "original", model: str = "",
                   session_timeout_sec: int = 900,
-                  viewport_w: int = 800, viewport_h: int = 800) -> Dict:
+                  viewport_w: int = 800, viewport_h: int = 800,
+                  cookie_file: str = "", cookies_from_browser: str = "",
+                  profile_dir: Optional[Path] = None,
+                  captcha_mode: str = "off",
+                  idle_timeout: Optional[int] = None,
+                  linger: bool = False) -> Dict:
     """视觉会话模式（--method vision）：给多模态模型的"眼睛+手"。
 
     协议（stdin/stdout 各一行一个 JSON，AI Agent 驱动）：
@@ -2495,7 +2597,10 @@ def _vision_route(url: str, output_dir: Path, headed: bool = False, safe: bool =
     兜底（防 AI 侧故障拖死本进程）：
       - 会话总时长上限 session_timeout_sec（默认 900s）：超时自动收尾退出，
         绝不因 AI 卡死/不发 quit 变僵尸进程；
-      - 指令间隔看门狗：连续 120s 收不到下一条指令视为 AI 断线，自动收尾退出；
+      - 指令间隔看门狗：连续 idle_limit 秒收不到下一条指令视为 AI 断线，自动收尾退出
+        （默认 120s；--headed 有人在场自动放宽 600s；--idle-timeout 显式覆盖，0=关闭）；
+      - --linger：会话结束不立即关浏览器——--headed 窗口留给人看完手动关（上限1h），
+        无头 30s 宽限自退。AI 脚本崩了浏览器现场不再消失；
       - 任何单条指令异常都返回 failed 状态继续会话，不会整体崩溃。
 
     状态 JSON 字段：
@@ -2521,12 +2626,15 @@ def _vision_route(url: str, output_dir: Path, headed: bool = False, safe: bool =
                 shots_used += 1
                 all_shots.append(shot)
                 last_auto_shot = time.time()  # 拍过就重置自动截图计时，避免动作拍完紧跟自动拍
-        # 验证码自动检测（每步都查，检测到立即上报——不绕过，人工接管）
+        # 验证码检测默认关闭（v1.14.2）：此前默认每步检测+上报 captcha_detected，
+        # 误报（轮播图/图标类）会让下游 AI"见到验证码就停手"，操作全部卡死。
+        # 现在默认不检测不输出；确需检测时显式 --captcha-mode detect。
         captcha = []
-        try:
-            captcha = page.evaluate(CAPTCHA_JS) or []
-        except Exception:
-            pass
+        if captcha_mode == "detect":
+            try:
+                captcha = page.evaluate(CAPTCHA_JS) or []
+            except Exception:
+                pass
         state = {
             "event": "state",
             "done": done,
@@ -2539,8 +2647,8 @@ def _vision_route(url: str, output_dir: Path, headed: bool = False, safe: bool =
         }
         if captcha:
             state["captcha_detected"] = captcha
-            state["captcha_help"] = ("验证码只检测不绕过（合法合规）。人工接管：用 --headed 重开会话，"
-                                     "人手动完成验证后 AI 发 wait 指令继续")
+            state["captcha_help"] = ("验证码只检测不绕过（合法合规）。人工接管：--headed --profile "
+                                     "重开会话（登录态保留），人手动完成验证后 AI 发 wait 指令继续")
         if note:
             state["note"] = note
         if extra:
@@ -2558,10 +2666,31 @@ def _vision_route(url: str, output_dir: Path, headed: bool = False, safe: bool =
             # 本地调试端口：eval 看门狗用它经 /json/close 强杀死循环页面
             # （仅绑 127.0.0.1，无对外暴露；其他路线不开，避免多余端口）
             debug_port = _free_port()
-            browser = p.chromium.launch(
-                headless=not headed,
-                args=_browser_launch_args(safe) + [f"--remote-debugging-port={debug_port}"])
-            try:
+            browser = None
+            context = None
+            if profile_dir:
+                # 持久化用户目录（--profile）：登录态/缓存跨会话保留，像真实浏览器。
+                # 固定 UA：UA 每次变会让部分站点作废登录会话。
+                # 同一目录同时只能开一个会话（Chromium 目录锁），打开失败如实降级。
+                try:
+                    context = p.chromium.launch_persistent_context(
+                        user_data_dir=str(profile_dir),
+                        headless=not headed,
+                        args=_browser_launch_args(safe) + [f"--remote-debugging-port={debug_port}"],
+                        user_agent=USER_AGENTS[0],
+                        viewport={"width": viewport_w, "height": viewport_h},
+                        locale="zh-CN", timezone_id="Asia/Shanghai",
+                        ignore_https_errors=True,
+                        **({"service_workers": "block"} if safe else {}),
+                    )
+                except Exception as exc:
+                    sys.stderr.write(f"[profile] 持久化上下文打开失败（目录被占用/损坏）: {exc}\n"
+                                     "[profile] 回退一次性上下文\n")
+                    context = None
+            if context is None:
+                browser = p.chromium.launch(
+                    headless=not headed,
+                    args=_browser_launch_args(safe) + [f"--remote-debugging-port={debug_port}"])
                 context = browser.new_context(
                     user_agent=random.choice(USER_AGENTS),
                     # 视口默认 800×800 = DeepSeek 视觉原生分辨率（超范围会被官方压糊）；
@@ -2571,8 +2700,13 @@ def _vision_route(url: str, output_dir: Path, headed: bool = False, safe: bool =
                     ignore_https_errors=True,
                     **({"service_workers": "block"} if safe else {}),
                 )
+            try:
                 context.add_init_script(STEALTH_JS + MOUSE_TRACK_JS)
-                page = context.new_page()
+                # 登录态注入（--cookies / --cookies-from-browser）：
+                # 豆包等登录墙站点带 cookie 开会，否则能打字但发送无反应
+                if cookie_file or cookies_from_browser:
+                    _inject_login_cookies(context, cookie_file, cookies_from_browser, "vision")
+                page = context.pages[0] if (browser is None and context.pages) else context.new_page()
                 if safe:
                     _setup_safe_mode(context, page)
                 # 目录已有旧截图时提醒（自动清理有误删风险，只提示）
@@ -2611,7 +2745,7 @@ def _vision_route(url: str, output_dir: Path, headed: bool = False, safe: bool =
                     init_extra["redirected_from"] = url
                 _emit_state(page, note=(f"启动 URL 打不开：{startup_failed}"
                                         "（会话保留，可发 goto 指令换 URL）") if startup_failed else "",
-                            extra=init_extra)
+                            extra=init_extra, shoot=not startup_failed)  # 启动失败不拍空白页浪费截图预算
                 # 指令循环：stdin 逐行 JSON → 执行 → 输出新状态（EOF/quit 退出）。
                 # 看门狗兜底（跨平台方案：读线程+队列，Windows 的 stdin 不是 socket
                 # 用不了 selectors）：AI 卡死不发指令（120s 断线）或会话超总时长
@@ -2633,7 +2767,16 @@ def _vision_route(url: str, output_dir: Path, headed: bool = False, safe: bool =
                 reader = _threading.Thread(target=_stdin_reader, daemon=True)
                 reader.start()
                 session_start = time.time()
-                idle_limit = 120  # 连续 120s 无下一条指令 = AI 断线
+                # 空闲看门狗：默认 120s 判 AI 断线；--headed 有人在场自动放宽到 600s
+                # （扫码/人肉操作不被误杀）；--idle-timeout 显式覆盖（0=关闭，只受总时长约束）
+                if idle_timeout is not None and idle_timeout > 0:
+                    idle_limit = idle_timeout
+                elif idle_timeout == 0:
+                    idle_limit = max(session_timeout_sec, 1)
+                elif headed:
+                    idle_limit = 600
+                else:
+                    idle_limit = 120
                 # 截图节奏（shot_policy 指令可调）：默认动一次拍一张；空闲自动拍默认关
                 shot_every = 1
                 auto_interval_ms = 0
@@ -2655,7 +2798,8 @@ def _vision_route(url: str, output_dir: Path, headed: bool = False, safe: bool =
                     except _queue.Empty:
                         now2 = time.time()
                         if now2 - last_cmd_time >= idle_limit:
-                            _emit_state(page, done=True, note="空闲看门狗：120s 未收到指令，判定 AI 侧断线，自动收尾")
+                            _emit_state(page, done=True,
+                                        note=f"空闲看门狗：{idle_limit}s 未收到指令，判定 AI 侧断线，自动收尾")
                             break
                         # 空闲自动截图：到点且预算没耗尽才拍；耗尽则自动关并告知（防刷屏）
                         if auto_interval_ms and (now2 - last_auto_shot) * 1000 >= auto_interval_ms:
@@ -2706,6 +2850,15 @@ def _vision_route(url: str, output_dir: Path, headed: bool = False, safe: bool =
                         # 这里直接重建空白页，会话保活（AI 重新 goto 即可）
                         try:
                             page = context.new_page()
+                            if safe:
+                                # 重建页要重挂弹窗拦截：context.route 还在，但 popup
+                                # 监听挂在旧 page 上，跟旧页一起丢了（修复安全模式缺口）
+                                def _close_rebuilt_popup(popup):
+                                    try:
+                                        popup.close()
+                                    except Exception:
+                                        pass
+                                page.on("popup", _close_rebuilt_popup)
                         except Exception:
                             # context 也没了：输出收尾状态后走异常路径，
                             # finally 里 browser.close() 正常清理，绝不挂死
@@ -2741,7 +2894,36 @@ def _vision_route(url: str, output_dir: Path, headed: bool = False, safe: bool =
                         shoot_now = False
                     _emit_state(page, note=r.get("note", ""), extra=extra, shoot=shoot_now)
             finally:
-                browser.close()
+                if linger:
+                    # 会话结束不立即关浏览器（--linger）：AI 脚本崩了/EOF/quit 时现场保留——
+                    # --headed 窗口留给人看完手动关（上限 1h 防真僵尸）；无头没人看，30s 宽限即退
+                    try:
+                        print(json.dumps({
+                            "event": "state", "done": True,
+                            "note": ("AI 已断开，浏览器窗口保留中——看完手动关闭窗口即退出"
+                                     if headed else "AI 已断开，无头浏览器保留 30s 后自动退出"),
+                        }, ensure_ascii=False), flush=True)
+                        deadline = time.time() + (3600 if headed else 30)
+                        while time.time() < deadline:
+                            time.sleep(1)
+                            try:
+                                if browser is not None:
+                                    if not browser.is_connected():
+                                        break  # 用户关了窗口
+                                elif context is not None:
+                                    if not context.pages:
+                                        break  # 持久化上下文的窗口被关闭
+                            except Exception:
+                                break  # 连接已死 = 窗口已关
+                    except Exception:
+                        pass
+                if browser is not None:
+                    browser.close()
+                elif context is not None:
+                    try:
+                        context.close()  # 持久化上下文：close 才把 cookie/缓存刷进用户目录
+                    except Exception:
+                        pass  # 窗口已被用户手动关闭时 close 会抛，属正常收尾
         return {**base, "count": len(all_shots), "screenshots": all_shots,
                 "screenshots_used": shots_used, "api_hint": _vision_api_hint(detail)}
     except Exception as exc:
@@ -3068,6 +3250,10 @@ def auto_save_url(
     vision_viewport: tuple = (800, 800),
     cookie_file: str = "",
     cookies_from_browser: str = "",
+    profile_dir: Optional[Path] = None,
+    captcha_mode: str = "off",
+    idle_timeout: Optional[int] = None,
+    linger: bool = False,
 ) -> Dict:
     """
     核心逻辑：
@@ -3098,7 +3284,8 @@ def auto_save_url(
             r = auto_save_url(url, output_dir, wait_seconds, "harvest", headed, max_wait,
                               auto_wait, save_junk, keep_segments, media_types, safe,
                               cookie_file=cookie_file,
-                              cookies_from_browser=cookies_from_browser)
+                              cookies_from_browser=cookies_from_browser,
+                              profile_dir=profile_dir)
             if r.get("saved"):
                 r["method"] = f"{method}->harvest(note)"
                 r["note_auto_rerouted"] = True
@@ -3124,14 +3311,19 @@ def auto_save_url(
                                            auto_wait, save_junk, keep_segments, media_types, safe,
                                            max_chapters=1, allow_chapters=False)
                 elif m == "harvest":
-                    # harvest 在 chain 里只收图片/音频（视频已由 browser/cache 干过一遍）
+                    # harvest 在 chain 里只收图片/音频（视频已由 browser/cache 干过一遍）。
+                    # cookie/profile 也要带上：登录墙图集（抖音 note 等）不带 cookie 收不到原图
                     result = auto_save_url(url, output_dir, wait_seconds, m, headed, max_wait,
-                                           auto_wait, save_junk, keep_segments, "image,audio", safe)
+                                           auto_wait, save_junk, keep_segments, "image,audio", safe,
+                                           cookie_file=cookie_file,
+                                           cookies_from_browser=cookies_from_browser,
+                                           profile_dir=profile_dir)
                 else:
                     result = auto_save_url(url, output_dir, wait_seconds, m, headed, max_wait,
                                            auto_wait, save_junk, keep_segments, media_types, safe,
                                            cookie_file=cookie_file,
-                                           cookies_from_browser=cookies_from_browser)
+                                           cookies_from_browser=cookies_from_browser,
+                                           profile_dir=profile_dir)
             except Exception as exc:
                 # 某一环崩了（页面打不开/playwright 缺失等）不让 chain 整体死掉，继续试下一种
                 result = {"saved": [], "count": 0, "method": m, "yt_dlp_error": f"crash: {exc}"}
@@ -3175,7 +3367,13 @@ def auto_save_url(
         return _vision_route(url, output_dir, headed=headed, safe=safe,
                              max_screens=vision_max_screens, detail=vision_detail,
                              model=model_name, session_timeout_sec=vision_timeout,
-                             viewport_w=vision_viewport[0], viewport_h=vision_viewport[1])
+                             viewport_w=vision_viewport[0], viewport_h=vision_viewport[1],
+                             cookie_file=cookie_file,
+                             cookies_from_browser=cookies_from_browser,
+                             profile_dir=profile_dir,
+                             captcha_mode=captcha_mode,
+                             idle_timeout=idle_timeout,
+                             linger=linger)
 
     # direct：只尝试直接下载直链媒体文件。
     if method == "direct":
@@ -3206,27 +3404,46 @@ def auto_save_url(
             try:
                 with sync_playwright() as p:
                     browser = None
+                    context = None
                     try:
-                        browser = p.chromium.launch(
-                            headless=not headed,
-                            args=_browser_launch_args(safe),
-                        )
-                        context = browser.new_context(
-                            user_agent=random.choice(USER_AGENTS),
-                            viewport={"width": 1920, "height": 1080},
-                            locale="zh-CN",
-                            timezone_id="Asia/Shanghai",
-                            extra_http_headers={"Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"},
-                            **({"service_workers": "block"} if safe else {}),
-                        )
-                        context.add_init_script(STEALTH_JS)
-                        # 登录态注入：抖音 note 图集原图等登录墙资源，带 cookie 才放行
-                        if cookie_file:
-                            ok_c, c_info = _add_cookies_to_context(context, cookie_file)
-                            sys.stderr.write(
-                                f"[cookies] harvest 注入{str(c_info) + ' 条' if ok_c else '失败: ' + str(c_info)}\n"
+                        if profile_dir:
+                            # 持久化用户目录（--profile）：登录态跨会话保留；固定 UA 防会话作废
+                            try:
+                                context = p.chromium.launch_persistent_context(
+                                    user_data_dir=str(profile_dir),
+                                    headless=not headed,
+                                    args=_browser_launch_args(safe),
+                                    user_agent=USER_AGENTS[0],
+                                    viewport={"width": 1920, "height": 1080},
+                                    locale="zh-CN",
+                                    timezone_id="Asia/Shanghai",
+                                    extra_http_headers={"Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"},
+                                    **({"service_workers": "block"} if safe else {}),
+                                )
+                            except Exception as exc:
+                                sys.stderr.write(f"[profile] 持久化上下文打开失败（目录被占用/损坏）: {exc}\n"
+                                                 "[profile] 回退一次性上下文\n")
+                                context = None
+                        if context is None:
+                            browser = p.chromium.launch(
+                                headless=not headed,
+                                args=_browser_launch_args(safe),
                             )
-                        page = context.new_page()
+                            context = browser.new_context(
+                                user_agent=random.choice(USER_AGENTS),
+                                viewport={"width": 1920, "height": 1080},
+                                locale="zh-CN",
+                                timezone_id="Asia/Shanghai",
+                                extra_http_headers={"Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"},
+                                **({"service_workers": "block"} if safe else {}),
+                            )
+                        context.add_init_script(STEALTH_JS)
+                        # 登录态注入：抖音 note 图集原图等登录墙资源，带 cookie 才放行。
+                        # cookies.txt 与本机浏览器登录态（--cookies-from-browser，借道 yt-dlp
+                        # 提取）都支持——此前浏览器参数在这条路线被静默无视
+                        if cookie_file or cookies_from_browser:
+                            _inject_login_cookies(context, cookie_file, cookies_from_browser, "harvest")
+                        page = context.pages[0] if (browser is None and context.pages) else context.new_page()
                         blocked = _setup_safe_mode(context, page) if safe else {}
                         page.goto(url, wait_until="domcontentloaded", timeout=30000)
                         try:
@@ -3261,6 +3478,8 @@ def auto_save_url(
                     finally:
                         if browser is not None:
                             browser.close()
+                        elif context is not None:
+                            context.close()  # 持久化上下文：close 才把 cookie/缓存刷进用户目录
             except Exception as exc:
                 # 页面打不开/超时：返回错误而不是崩溃，chain 能继续用其他方式
                 harvest_error = f"browser error: {exc}"
@@ -3329,36 +3548,58 @@ def auto_save_url(
     # browser / auto 的浏览器阶段：边播边缓存。
     saved: List[Dict] = []
     seen: set = set()
+    body_hashes: set = set()  # 非 cache 模式内容指纹：同文件重复响应（字节相同）去重
     counter = 0
 
     from playwright.sync_api import sync_playwright
     with sync_playwright() as p:
         browser = None
+        context = None
         try:
-            browser = p.chromium.launch(
-                headless=not headed,
-                args=_browser_launch_args(safe),
-            )
-            context = browser.new_context(
-                accept_downloads=True,
-                user_agent=random.choice(USER_AGENTS),
-                viewport={
-                    "width": random.randint(1280, 1920),
-                    "height": random.randint(800, 1080),
-                },
-                locale="zh-CN",
-                timezone_id="Asia/Shanghai",
-                extra_http_headers={"Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"},
-                **({"service_workers": "block"} if safe else {}),
-            )
-            context.add_init_script(STEALTH_JS)
-            # 登录态注入：抖音/B站登录墙站点，带 cookie 浏览器才放行视频流
-            if cookie_file:
-                ok_c, c_info = _add_cookies_to_context(context, cookie_file)
-                sys.stderr.write(
-                    f"[cookies] 浏览器路线注入{str(c_info) + ' 条' if ok_c else '失败: ' + str(c_info)}\n"
+            if profile_dir:
+                # 持久化用户目录（--profile）：登录态跨会话保留；固定 UA 防会话作废
+                try:
+                    context = p.chromium.launch_persistent_context(
+                        user_data_dir=str(profile_dir),
+                        headless=not headed,
+                        accept_downloads=True,
+                        args=_browser_launch_args(safe),
+                        user_agent=USER_AGENTS[0],
+                        viewport={"width": 1920, "height": 1080},
+                        locale="zh-CN",
+                        timezone_id="Asia/Shanghai",
+                        extra_http_headers={"Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"},
+                        ignore_https_errors=True,
+                        **({"service_workers": "block"} if safe else {}),
+                    )
+                except Exception as exc:
+                    sys.stderr.write(f"[profile] 持久化上下文打开失败（目录被占用/损坏）: {exc}\n"
+                                     "[profile] 回退一次性上下文\n")
+                    context = None
+            if context is None:
+                browser = p.chromium.launch(
+                    headless=not headed,
+                    args=_browser_launch_args(safe),
                 )
-            page = context.new_page()
+                context = browser.new_context(
+                    accept_downloads=True,
+                    user_agent=random.choice(USER_AGENTS),
+                    viewport={
+                        "width": random.randint(1280, 1920),
+                        "height": random.randint(800, 1080),
+                    },
+                    locale="zh-CN",
+                    timezone_id="Asia/Shanghai",
+                    extra_http_headers={"Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"},
+                    ignore_https_errors=True,  # 与 files/vision 路线同口径：自签证书站点也能开
+                    **({"service_workers": "block"} if safe else {}),
+                )
+            context.add_init_script(STEALTH_JS)
+            # 登录态注入：抖音/B站登录墙站点，带 cookie 浏览器才放行视频流。
+            # cookies.txt 与本机浏览器登录态（--cookies-from-browser）都支持
+            if cookie_file or cookies_from_browser:
+                _inject_login_cookies(context, cookie_file, cookies_from_browser, "浏览器路线")
+            page = context.pages[0] if (browser is None and context.pages) else context.new_page()
             blocked = _setup_safe_mode(context, page) if safe else {}
 
             capture_cache = method in ("cache", "browser", "auto")
@@ -3376,14 +3617,29 @@ def auto_save_url(
                     if not kind or kind not in allowed_kinds:
                         return
                     # Skip already-seen URLs to avoid saving the same file repeatedly.
-                    # 分段流经常同路径不同 query，缓存模式必须用完整 URL 区分每个分段。
-                    key = response.url if capture_cache else response.url.split("?")[0]
+                    # 超大响应预检：content-length 明示 >1GB 直接跳过（body() 会整包进内存）
+                    try:
+                        cl = response.headers.get("content-length", "")
+                        if cl and int(cl) > 1024 * 1024 * 1024:
+                            sys.stderr.write(f"[network-save] 跳过超大响应(>1GB): {response.url[:100]}\n")
+                            return
+                    except ValueError:
+                        pass
+                    # key 统一用完整 URL：同路径不同 query 是不同文件（旧逻辑砍掉 query
+                    # 会误丢，YouTube watch?v= 同理）；真重复（同文件重发）靠字节指纹砍
+                    key = response.url
                     if key in seen:
                         return
                     seen.add(key)
                     body = response.body()
                     if len(body) < 1024:
                         return
+                    if not capture_cache:
+                        # 内容指纹去重：同一文件的重复响应（缓存穿透/重试）字节相同即砍
+                        body_hash = hashlib.md5(body).hexdigest()
+                        if body_hash in body_hashes:
+                            return
+                        body_hashes.add(body_hash)
                     # 垃圾资源：图片图标任何模式都挡；视频/音频垃圾只在非分段模式挡（分段是正片不能误删）
                     is_junk = _is_junk_resource(response.url, content_type, len(body))
                     if (kind == "image" and is_junk) or (not capture_cache and is_junk):
@@ -3549,12 +3805,17 @@ def auto_save_url(
         finally:
             if browser is not None:
                 browser.close()
+            elif context is not None:
+                context.close()  # 持久化上下文：close 才把 cookie/缓存刷进用户目录
 
     if saved:
         has_media = _has_video_or_audio(saved)
         # browser/cache 模式如果只抓到图片/封面，没有视频本体，自动降级 yt-dlp。
         if method in ("browser", "cache") and not has_media:
-            yt_fb, yt_error = _download_with_ytdlp(url, output_dir, safe)
+            # 内部降级也要带登录态：不带 cookie 的 yt-dlp 过不了登录墙（同链尾复试逻辑）
+            yt_fb, yt_error = _download_with_ytdlp(url, output_dir, safe,
+                                                    cookie_file=cookie_file,
+                                                    cookies_from_browser=cookies_from_browser)
             if yt_fb:
                 out = {
                     "mode": "url",
@@ -3604,7 +3865,9 @@ def auto_save_url(
 
     # browser/cache 模式什么都没抓到，再试 yt-dlp。
     if method in ("browser", "cache"):
-        yt_saved, yt_error = _download_with_ytdlp(url, output_dir, safe)
+        yt_saved, yt_error = _download_with_ytdlp(url, output_dir, safe,
+                                                   cookie_file=cookie_file,
+                                                   cookies_from_browser=cookies_from_browser)
         if yt_saved:
             out = {
                 "mode": "url",
@@ -3766,6 +4029,32 @@ def main(argv=None):
         choices=["chrome", "edge", "firefox"],
         help="直接读本机浏览器的登录 cookie（免导出，但本机该浏览器得登录过目标站点）。--cookies 同时给时文件优先",
     )
+    parser.add_argument(
+        "--profile",
+        nargs="?",
+        const=str(PROFILE_DIR),
+        default=None,
+        metavar="目录",
+        help="持久化浏览器用户目录：登录一次以后免登录（等同真实浏览器的用户配置，cookie/缓存跨会话保留）。不带值=默认 downloads/browser_profile/，也可给自定义路径。首次登录：--method vision --profile --headed 弹出窗口人肉扫码；之后 --profile 无头跑即可。目录含登录 cookie（已 gitignore，别拷给别人），同一目录同时只能开一个会话",
+    )
+    parser.add_argument(
+        "--captcha-mode",
+        choices=["off", "detect"],
+        default="off",
+        help="视觉会话验证码检测：off=不检测不输出（默认——此前误报会让 AI 见到 captcha_detected 就停手卡死）；detect=每步检测并上报（只检测不绕过，真验证码需 --headed 人工过）",
+    )
+    parser.add_argument(
+        "--idle-timeout",
+        type=int,
+        default=None,
+        metavar="秒",
+        help="视觉会话空闲看门狗：N 秒收不到下一条指令判定 AI 断线自动收尾（默认 120；--headed 有人在场自动放宽到 600；0=关闭，只受 --vision-timeout 总时长约束）",
+    )
+    parser.add_argument(
+        "--linger",
+        action="store_true",
+        help="视觉会话结束后不立即关浏览器：--headed 窗口保留给人看完手动关（上限1h）；无头保留 30s 自动退。AI 脚本崩了浏览器现场不再消失",
+    )
     parser.add_argument("--json", action="store_true", help="Output JSON")
     args = parser.parse_args(argv)
 
@@ -3780,6 +4069,11 @@ def main(argv=None):
         output_dir = Path(__file__).resolve().parent.parent / "downloads" / "safe"
     else:
         output_dir = Path(__file__).resolve().parent.parent / "downloads" / "cache"
+
+    # 持久化用户目录（--profile）：登录一次以后免登录
+    profile_dir = Path(args.profile).expanduser().resolve() if args.profile else None
+    if profile_dir:
+        print(f"[profile] 持久化用户目录: {profile_dir}（登录态跨会话保留）", file=sys.stderr)
 
     if args.url:
         # --url 自动选路：照片页/音频页走 harvest 专用线，文件走 files 专用线，视频/直链走 chain（原路不变）。
@@ -3821,6 +4115,10 @@ def main(argv=None):
                 vision_viewport=vision_vp,
                 cookie_file=args.cookies,
                 cookies_from_browser=args.cookies_from_browser,
+                profile_dir=profile_dir,
+                captcha_mode=args.captcha_mode,
+                idle_timeout=args.idle_timeout,
+                linger=args.linger,
             )
             # 自动选到 harvest/files 但颗粒无收：退回通用链再试一次（chain 自带优雅降级）。
             if auto_routed and data.get("count", 0) == 0 and not args.click_download:
@@ -3841,6 +4139,7 @@ def main(argv=None):
                         zip_bundle=args.zip,
                         cookie_file=args.cookies,
                         cookies_from_browser=args.cookies_from_browser,
+                        profile_dir=profile_dir,
                     )
                     data["method_fallback"] = f"{method}→chain"
                 except Exception:
@@ -3896,6 +4195,7 @@ def main(argv=None):
                     max_chapters=args.max_chapters,
                     cookie_file=args.cookies,
                     cookies_from_browser=args.cookies_from_browser,
+                    profile_dir=profile_dir,
                 )
             except Exception as exc:
                 data = {
@@ -3933,6 +4233,7 @@ def main(argv=None):
                         safe=args.safe,
                         zip_bundle=args.zip,
                         max_chapters=args.max_chapters,
+                        profile_dir=profile_dir,
                     )
                     if retry.get("count", 0) > 0:
                         retry["mode"] = "query"

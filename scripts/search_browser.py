@@ -37,11 +37,12 @@ except ImportError:  # 单文件挪走用时退化为普通模式
         return {}
 
     def _BROWSER_LAUNCH_ARGS(safe):  # type: ignore
-        return [
-            "--disable-blink-features=AutomationControlled",
-            "--disable-features=IsolateOrigins,site-per-process",
-            "--no-sandbox",
-        ]
+        # 与 auto_save_browser._browser_launch_args 同口径：safe 时必须恢复进程沙箱
+        # （此前的兜底版本无视 safe 参数恒给 --no-sandbox，安全模式被静默削弱）
+        args = ["--disable-blink-features=AutomationControlled"]
+        if not safe:
+            args += ["--disable-features=IsolateOrigins,site-per-process", "--no-sandbox"]
+        return args
 
 try:
     from playwright.sync_api import sync_playwright
@@ -549,10 +550,21 @@ def _filter_site(results: List[Dict[str, str]], site: str) -> List[Dict[str, str
     ]
 
 
+def _query_terms(query: str) -> List[str]:
+    r"""分词：英文/数字按词切；中文整句会被 \w+ 黏成一个词（precision 排序对中文
+    直接失效），拆成二元组做匹配粒度。"""
+    terms = [t.lower() for t in re.findall(r"[a-zA-Z0-9_]+", query) if len(t) > 1]
+    cjk = re.findall(r"[\u4e00-\u9fff]", query)
+    terms += [cjk[i] + cjk[i + 1] for i in range(len(cjk) - 1)]
+    return terms
+
+
 def _score_results(results: List[Dict[str, str]], query: str, precision: int = 50) -> List[Dict[str, str]]:
     if precision <= 0:
         return results
-    terms = [t.lower() for t in re.findall(r"\w+", query) if len(t) > 1]
+    terms = _query_terms(query)
+    if not terms:
+        return results
     def score(r):
         text = f"{r.get('title', '')} {r.get('url', '')} {r.get('snippet', '')}".lower()
         return sum(text.count(t) for t in terms)
@@ -622,6 +634,7 @@ def run_search(query: str, max_results: int, engines: List[str], proxy: str = ""
                 locale="zh-CN",
                 timezone_id="Asia/Shanghai",
                 extra_http_headers={"Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"},
+                ignore_https_errors=True,  # 与 auto_save_browser 各路线同口径：自签证书站点也能开
             )
             # 安全模式：禁 Service Worker（挖矿/恶意持久化常用）
             if safe:

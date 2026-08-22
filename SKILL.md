@@ -1,7 +1,7 @@
 ---
 name: deepseek-web-search
 description: DeepSeek 联网搜索技能。遇到实时信息、事实核查、新闻、价格、代码报错、未知名词或用户说“搜一下”时，必须使用本技能搜索并附来源。
-version: 1.13.1
+version: 1.14.2
 updated: 2026-08-22
 author: user
 license: MIT
@@ -29,6 +29,7 @@ tags: [web, search, deepseek, 联网, 搜索]
 | 抓文章正文/小说章节 | `auto_save_browser.py --url 文章或目录页 --media-type text`（text 专用线：单页正文/小说目录逐章合并成 txt/txt直链直下，`--max-chapters` 控制上限） |
 | 校验抓包产物/分正片垃圾/查虚标 | `verify_capture.py --dir <产物目录>` |
 | 网站可疑/怕挖矿病毒/保护本机 | 任何命令加 `--safe`（安全模式） |
+| 登录一次以后免登录（豆包/抖音/B站网页版等） | 任意命令加 `--profile`：固定浏览器用户目录，登录态跨会话保留；首次配 `--method vision --profile --headed` 人肉登录一次 |
 | 自己的本地索引 | `own_search.py search` |
 | 看页面长什么样（多模态模型专用） | 任意命令加 `--screenshot`：整页截图(PNG)+屏幕信息喂给视觉模型 |
 | 像人一样看着屏幕操作页面（多模态专用） | `auto_save_browser.py --url ... --method vision`：截图+鼠标键盘控制会话 |
@@ -60,6 +61,7 @@ tags: [web, search, deepseek, 联网, 搜索]
 | 抖音/B站报 `需要 cookie`/`Sign in to confirm`/登录墙空壳（video_layout=null、无视频流） | 加 `--cookies-from-browser chrome`（本机 Chrome 登录过）或 `--cookies cookies.txt`；chain 模式带 cookie 全链失败还会自动用 cookie 复试一次 |
 | 抖音 `/note/` 图文帖报 `Unsupported URL` | 不用处理——v1.13.0 起自动转 harvest 收割图集原图（`note_auto_rerouted: true`）；原图仍空说明图集需登录，加 cookie 再试 |
 | 抖音长视频/直播只下到 1.3KB+封面（流没放行） | 站点按视频"看心情"放行，不是工具 bug；如实报告 + 建议 cookie 重试或换 `--method browser` |
+| 豆包等聊天站：能打字但发送无反应/输入被清空 | 未登录（无登录态时站点不渲染发送按钮，回车=弹登录框+清空输入框）：加 `--profile` 开持久会话，首次 `--headed` 人肉登录，之后免登录 |
 | SPA 图集只抓到几张可见图（懒加载抓不全） | v1.13.1 已修：harvest 路线自动迭代滚动收割（逐段滚→收新图→直到无新增）；仍不全时换 `--method harvest` 显式指定再试 |
 
 ## Token 经济（DeepSeek 上下文管理）
@@ -104,13 +106,15 @@ tags: [web, search, deepseek, 联网, 搜索]
 
 **elements 元素标注**（点按钮前先拿这个，不用从截图猜像素）：返回视口内全部可见可点元素 `[{tag, text, x, y, w, h, type, name}]`——x/y 是中心坐标直接喂给 click。
 
-**验证码处理（重要，合法合规）**：每步自动检测验证码（geetest/recaptcha/hCaptcha/滑块/点选），检测到状态里出 `captcha_detected: [类型]` + `captcha_help`。**只检测不绕过**——自动破解验证码违法且违反站点条款。正确姿势：告诉用户"页面有验证码"，用 `--headed` 重开会话让用户手动完成（人过的验证码天经地义），AI 用 `{"action":"wait","ms":5000}` 等用户解完再继续。
+**验证码（默认不检测，v1.14.2 起）**：验证码检测默认**关闭**——历史版本每步检测并输出 `captcha_detected`，误报（轮播图/图标类页面）导致 AI"见到就停手"，操作全部卡死；且自动破解验证码违法且违反站点条款，工具本来也只检测不绕过。现在默认不检测不输出，操作一路畅通。若确需检测提示：`--captcha-mode detect`；页面真有验证码卡住时，用 `--headed --profile` 重开会话人工完成（登录态保留），完成后继续。
+
+**驱动方式说明**：会话协议为程序管道设计（AI 子进程驱动：stdin 逐行 JSON 进、stdout 逐行 JSON state 出）。人在交互终端（TTY）里手敲指令会混入终端回声——手动看页面/操作页面请用 `--headed` 直接操作真窗口，别在 TTY 里手敲协议。
 
 **成本防护**：`--max-screenshots`（默认 30）封顶截图数，超限自动停截图只报状态；`--shot-detail low` 用 512×512 省钱模式。默认节奏=每个成功动作截 1 张（失败指令不截不耗预算）；嫌费发 `{"action":"shot_policy","every":3}` 改成每 3 个动作 1 张。空闲自动截图（`interval_ms`）默认关，开启后预算耗尽会自动停并告知。
 
 **视口默认 800×800**（DeepSeek 视觉原生分辨率，超范围官方压糊）：启动可用 `--viewport 1280x800` 指定，会话中可发 `{"action":"viewport","width":W,"height":H}` 动态改（改完坐标基准变了，重新 elements）。注意 800px 宽度下部分网站会切移动版布局，需要桌面版就改宽视口。
 
-**兜底（你挂了它也不会挂）**：会话总时长上限 `--vision-timeout`（默认 900s）；120s 收不到你的下一条指令 = 判定你断线，自动收尾退出；任何指令异常只回 failed 不崩会话；进程绝不因调用方故障挂死。
+**兜底（你挂了它也不会挂）**：会话总时长上限 `--vision-timeout`（默认 900s）；空闲看门狗：连续 `--idle-timeout` 秒（默认 120）收不到你的下一条指令 = 判定你断线，自动收尾退出——`--headed` 有人在场时自动放宽到 600s（扫码/人肉操作不被误杀），给 0 = 关闭只受总时长约束；`--linger` 让会话结束（AI 断线/quit/EOF）后浏览器不立即关：`--headed` 窗口保留给人看完手动关（上限 1h）、无头保留 30s 自退——AI 脚本崩了浏览器现场不再消失；任何指令异常只回 failed 不崩会话；进程绝不因调用方故障挂死。
 
 ## 依赖安装（AI 自动处理，不要让用户手动装）
 
@@ -285,7 +289,9 @@ python "{baseDir}/scripts/auto_save_browser.py" --url "https://v.douyin.com/xxx"
 python "{baseDir}/scripts/auto_save_browser.py" --url "https://v.douyin.com/xxx" --cookies-from-browser chrome --json
 ```
 
-cookie 全线生效：yt-dlp 路线（`cookiefile`/`cookiesfrombrowser`）、浏览器/cache 路线（context.add_cookies 注入）、harvest 路线、note 图集转路全部吃到；两个参数同时给时文件优先。cookie 过期或域不匹配会如实报错，不静默失败。`own_search.py download` 同名参数透传。
+cookie 生效路线（v1.14.0 起）：yt-dlp（`cookiefile`/`cookiesfrombrowser`）、浏览器/cache、harvest、vision 视觉会话、note 图集转路全部吃到（`--cookies-from-browser` 现在借道 yt-dlp 提取器读本机浏览器登录态真正注入浏览器路线，此前只在 yt-dlp 路线生效）；files/text 文件线不吃 cookie，登录文件站改用 `--profile`。两个参数同时给时文件优先。cookie 过期或域不匹配会如实报错，不静默失败。`own_search.py download` 同名参数透传。
+
+**持久化登录（v1.14.0，`--profile [目录]`）**：无头浏览器默认每次都是"全新访客"，登录墙站点每次都要重新登录。加 `--profile` 后浏览器使用固定用户目录（默认 `downloads/browser_profile/`），cookie/缓存/登录态跨会话保留，和真实浏览器一模一样。首次登录：`--method vision --profile --headed` 弹出窗口人肉扫码；之后 `--profile` 无头跑即可免登录。注意：目录里存的是登录 cookie（已 gitignore，别拷给别人），同一目录同时只能开一个会话。
 
 不指定 `--method` 时自动选路：视频站/媒体直链→chain（原路不变）；图片站/音乐站/`--media-type` 单选的照片页音频页→harvest 专用线（DOM 收割+页面上下文下载，快），颗粒无收自动退回 chain 再试；文件（zip/pdf/docx 等直链，或 `--media-type file` / 关键词含"文件/压缩包/文档/pdf"）→files 专用线。显式指定 `--method` 时完全按指定的走。**视频站域名一票否决**：抖音/B站等"视频流+音频流分离"的站点无论 `--media-type` 怎么单选都走视频路（yt-dlp 双流合并），页面里的音频是视频伴音，绝不能拆开只抓半条流；纯图片/纯音频收割时也跳过 m4s/ts 分离流分段防残件。
 
