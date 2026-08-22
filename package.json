@@ -1,6 +1,6 @@
 {
   "name": "deepseek-web-search",
-  "version": "1.15.0",
+  "version": "1.16.0",
   "description": "DeepSeek 联网搜索技能：Playwright 真实浏览器模拟 + 轻量多引擎搜索 + 自动保存型浏览器下载、免 API Key、强制引用来源。",
   "main": "scripts/search.py",
   "scripts": {

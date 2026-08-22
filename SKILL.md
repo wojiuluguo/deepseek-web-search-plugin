@@ -1,7 +1,7 @@
 ---
 name: deepseek-web-search
 description: DeepSeek 联网搜索技能。遇到实时信息、事实核查、新闻、价格、代码报错、未知名词或用户说“搜一下”时，必须使用本技能搜索并附来源。
-version: 1.15.0
+version: 1.16.0
 updated: 2026-08-22
 author: user
 license: MIT
@@ -62,7 +62,7 @@ tags: [web, search, deepseek, 联网, 搜索]
 | 抖音 `/note/` 图文帖报 `Unsupported URL` | 不用处理——v1.13.0 起自动转 harvest 收割图集原图（`note_auto_rerouted: true`）；原图仍空说明图集需登录，加 cookie 再试 |
 | 抖音长视频/直播只下到 1.3KB+封面（流没放行） | 站点按视频"看心情"放行，不是工具 bug；如实报告 + 建议 cookie 重试或换 `--method browser` |
 | 豆包等聊天站：能打字但发送无反应/输入被清空 | 未登录（无登录态时站点不渲染发送按钮，回车=弹登录框+清空输入框）：加 `--profile` 开持久会话，首次 `--headed` 人肉登录，之后免登录 |
-| SPA 图集只抓到几张可见图（懒加载抓不全） | v1.13.1 已修：harvest 路线自动迭代滚动收割（逐段滚→收新图→直到无新增）；仍不全时换 `--method harvest` 显式指定再试 |
+| SPA 图集只抓到几张可见图（懒加载抓不全/忽多忽少） | v1.13.1 迭代滚动收割 + v1.14.0 瞬时失败跨轮重试 + v1.16.0 每轮收割前等 in-flight 图片加载完（img.complete）；仍不全时换 `--method harvest` 显式指定再试 |
 
 ## Token 经济（DeepSeek 上下文管理）
 
@@ -97,16 +97,24 @@ tags: [web, search, deepseek, 联网, 搜索]
 {"action":"press","key":"Enter"}
 {"action":"focus","selector":"input[name=q]"}
 {"action":"elements"}
+{"action":"tabs"}                      // 标签页清单（点击开了新标签后查）
+{"action":"switch_tab","index":1}      // 切到指定标签（配合 tabs 用）
 {"action":"goto","url":"https://..."}
 {"action":"wait","ms":800}
 {"action":"eval","js":"document.title"}   // 执行 JS（>10s 疑似死循环会自动重置页面，会话保活，重新 goto 即可）
-{"action":"viewport","width":1280,"height":800}  // 改视口（默认 800×800=DeepSeek 视觉原生分辨率；改完坐标基准变了要重新 elements）
+{"action":"viewport","width":1280,"height":800}  // 改视口（默认 1440×900；改完坐标基准变了要重新 elements）
 {"action":"shot_policy","every":3}               // 截图节奏：每 3 个成功动作截 1 张（默认 1=动一次拍一次）
 {"action":"shot_policy","interval_ms":1000}      // 空闲时每秒自动截 1 张（默认 0=关；预算耗尽自动停）
 {"action":"quit"}
 ```
 
 **DOM 精准模式（v1.15.0，默认推荐）**：click/move/scroll 给 `text`（按页面文字找元素）或 `selector`（CSS 选择器）、type 给 `selector`，就走精准路径——**定位元素 → 等它可见(3s) → 取包围盒中心执行 → 验证效果 → 失败自动重试（最多 3 次）**。比从截图猜像素准得多，SPA 动态挂载/懒加载页面不再点空。type 精准模式自带回读验证（输入框内容必须真的包含所输文字，否则 JS 设值兜底——React 受控组件/富文本编辑器认事件不认按键，这套专治"输入后文字消失"）。click 可加 `"expect_gone": true` 要求点击后元素消失（关弹窗/下拉验证）。只给 x/y 时走原坐标路径，行为完全不变。
+
+**新标签页自动跟踪（v1.16.0）**：点"相关搜索/热搜"等 target=_blank 链接开了新标签时，会话**自动切到新标签**（note 告知"已自动切换"），截图/操作都落在新标签上；`tabs` 查标签清单（含当前标记）、`switch_tab` 手动切回/切换。
+
+**视口默认 1440×900（v1.16.0）**：800×800 实测会裁掉页面底部内容（如百度"百度一下"按钮被裁半）——完整性优先，清晰度由官方 384 token 封顶兜底；需要 DeepSeek 视觉原生 800×800 极致清晰时 `--viewport 800x800` 指定。800px 宽度下部分网站切移动版布局的问题也随之缓解。
+
+**中文输入备忘**：视觉会话原 `type`（纯坐标聚焦）对中文可能输出 `???`；**v1.15.0 起用精准输入 `{"action":"type","selector":"...","text":"中文"}`**——键盘通道失败自动 JS 设值兜底，中文可靠；纯 HTTP 搜索中文关键词建议直接走 `search.py`（不出输入法问题）。
 
 **每步输出状态**：`screenshot`（最新截图路径）+ `screen`（视口尺寸/整页尺寸/DPR/鼠标位置/滚动位置/当前焦点元素 active_element——你据此判断坐标和 Tab 导航结果）+ `screenshots_used/max`（成本计数）+ `api_hint`（官方 API 参数照抄即可拼请求：base64 内联、detail 等级、384 token 封顶）。失败指令（缺 x/y、缺 text、坏 JSON）只回错误 note 不消耗截图配额——页面没变不用重拍。`eval` 的结构化结果放 `eval_result` 字段（note 里是文本版）。启动 URL 打不开时**会话保活**（note 提示 startup url failed），直接发 `goto` 指令换 URL 即可，不用重开会话。页面发生跳转时初始状态带 `redirected_from` 告警。
 
@@ -118,7 +126,7 @@ tags: [web, search, deepseek, 联网, 搜索]
 
 **成本防护**：`--max-screenshots`（默认 30）封顶截图数，超限自动停截图只报状态；`--shot-detail low` 用 512×512 省钱模式。默认节奏=每个成功动作截 1 张（失败指令不截不耗预算）；嫌费发 `{"action":"shot_policy","every":3}` 改成每 3 个动作 1 张。空闲自动截图（`interval_ms`）默认关，开启后预算耗尽会自动停并告知。
 
-**视口默认 800×800**（DeepSeek 视觉原生分辨率，超范围官方压糊）：启动可用 `--viewport 1280x800` 指定，会话中可发 `{"action":"viewport","width":W,"height":H}` 动态改（改完坐标基准变了，重新 elements）。注意 800px 宽度下部分网站会切移动版布局，需要桌面版就改宽视口。
+**视口默认 1440×900**（v1.16.0：800×800 实测裁掉页面底部按钮，完整性优先；清晰度由官方 384 token 封顶兜底）：启动可用 `--viewport WxH` 指定（如 800x800=DeepSeek 视觉原生），会话中可发 `{"action":"viewport","width":W,"height":H}` 动态改（改完坐标基准变了，重新 elements）。
 
 **兜底（你挂了它也不会挂）**：会话总时长上限 `--vision-timeout`（默认 900s）；空闲看门狗：连续 `--idle-timeout` 秒（默认 120）收不到你的下一条指令 = 判定你断线，自动收尾退出——`--headed` 有人在场时自动放宽到 600s（扫码/人肉操作不被误杀），给 0 = 关闭只受总时长约束；`--linger` 让会话结束（AI 断线/quit/EOF）后浏览器不立即关：`--headed` 窗口保留给人看完手动关（上限 1h）、无头保留 30s 自退——AI 脚本崩了浏览器现场不再消失；任何指令异常只回 failed 不崩会话；进程绝不因调用方故障挂死。
 

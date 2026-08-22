@@ -1486,6 +1486,24 @@ def _wait_for_render(page, min_text: int = 50, max_wait_sec: float = 10.0) -> bo
     return False
 
 
+def _wait_images_complete(page, timeout_sec: float = 3.0) -> bool:
+    """等页面 in-flight 图片加载完（img.complete 全 true 或超时）。
+    治图集"忽多忽少"：收割太快时部分图还在加载中——没进 DOM 收割清单，
+    或进了但 fetch 404 被记失败拉黑。滚一轮等一拍再收，稳定得多。"""
+    deadline = time.time() + timeout_sec
+    try:
+        while time.time() < deadline:
+            pending = page.evaluate(
+                "() => [...document.images].filter(i => !i.complete && i.src).length"
+            ) or 0
+            if pending <= 0:
+                return True
+            page.wait_for_timeout(400)
+        return False
+    except Exception:
+        return False
+
+
 def _harvest_lazy_all(page, url: str, output_dir: Path, allowed_kinds: set, seen: set,
                       save_junk: bool, safe: bool = False,
                       max_rounds: int = 30, stall_limit: int = 4,
@@ -1505,6 +1523,7 @@ def _harvest_lazy_all(page, url: str, output_dir: Path, allowed_kinds: set, seen
         if len(saved_all) >= max_total:
             break
         _trigger_lazy_media(page)
+        _wait_images_complete(page)  # 等 in-flight 图挂载完再收，治忽多忽少
         batch = _harvest_dom_media(page, url, output_dir, allowed_kinds, seen,
                                    save_junk, limit=min(120, max_total - len(saved_all)),
                                    safe=safe, fail_counts=fail_counts)
@@ -1531,6 +1550,7 @@ def _harvest_lazy_all(page, url: str, output_dir: Path, allowed_kinds: set, seen
     try:
         page.wait_for_timeout(400)
         _trigger_lazy_media(page)
+        _wait_images_complete(page)
         tail = _harvest_dom_media(page, url, output_dir, allowed_kinds, seen,
                                   save_junk, limit=min(120, max(0, max_total - len(saved_all))),
                                   safe=safe, fail_counts=fail_counts)
@@ -2321,9 +2341,9 @@ def _screenshot_standalone(url: str, output_dir: Path, headed: bool = False, saf
 
 # 视觉会话支持的鼠标/键盘动作（官方 Vision 模型 + Playwright 鼠标 API 对齐）
 VISION_ACTIONS = ("click", "dblclick", "right_click", "move", "drag", "scroll",
-                  "type", "press", "focus", "elements", "goto", "back",
-                  "forward", "reload", "wait", "screenshot", "eval",
-                  "viewport", "shot_policy", "quit")
+                  "type", "press", "focus", "elements", "tabs", "switch_tab",
+                  "goto", "back", "forward", "reload", "wait", "screenshot",
+                  "eval", "viewport", "shot_policy", "quit")
 
 # 页面元素标注 JS：收集所有可见可点元素 + 视口坐标（视觉模型点前先 elements 拿准坐标，
 # 不用瞎猜截图里的像素位置）
@@ -2665,6 +2685,33 @@ def _vision_exec_action(page, cmd: Dict, output_dir: Path, prefix: str,
             # 视觉模型点按钮前先 elements 拿准坐标，不用从截图里猜像素
             els = page.evaluate(ELEMENTS_JS) or []
             return {"ok": True, "note": "", "elements": els}
+        elif act == "tabs":
+            # 标签页清单：点击开了新标签后用 tabs 看、switch_tab 切过去
+            tabs_info = []
+            try:
+                for i, p in enumerate(page.context.pages):
+                    u = ""
+                    t = ""
+                    try:
+                        u = p.url[:100]
+                        t = (p.title() or "")[:40]
+                    except Exception:
+                        pass
+                    tabs_info.append({"index": i, "url": u, "title": t,
+                                      "current": p is page})
+                return {"ok": True, "note": "", "tabs": tabs_info}
+            except Exception as exc:
+                return {"ok": False, "note": f"tabs 失败: {exc}"}
+        elif act == "switch_tab":
+            # 切标签页：{"action":"switch_tab","index":1}。点击开新标签后看新标签内容
+            try:
+                idx = int(cmd.get("index", -1))
+            except (TypeError, ValueError):
+                return {"ok": False, "note": "switch_tab 缺少 index（整数，先发 tabs 查清单）"}
+            pages = page.context.pages
+            if not (0 <= idx < len(pages)):
+                return {"ok": False, "note": f"index 超范围（现有 {len(pages)} 个标签，先发 tabs 查清单）"}
+            return {"ok": True, "note": "", "_switch_to": pages[idx]}
         elif act == "eval":
             # 防死循环卡死会话：evaluate 必须在主线程跑（Playwright sync API
             # 禁止跨线程调用），另起看门狗线程盯梢——10s 不返回就经 DevTools
@@ -2710,7 +2757,7 @@ def _vision_route(url: str, output_dir: Path, headed: bool = False, safe: bool =
                   max_screens: int = VISION_DEFAULT_MAX_SCREENS,
                   detail: str = "original", model: str = "",
                   session_timeout_sec: int = 900,
-                  viewport_w: int = 800, viewport_h: int = 800,
+                  viewport_w: int = 1440, viewport_h: int = 900,
                   cookie_file: str = "", cookies_from_browser: str = "",
                   profile_dir: Optional[Path] = None,
                   captcha_mode: str = "off",
@@ -2906,6 +2953,22 @@ def _vision_route(url: str, output_dir: Path, headed: bool = False, safe: bool =
 
                 cmd_q: "queue.Queue[Optional[str]]" = _queue.Queue()
 
+                # 新标签页自动跟踪（v1.16.0）：点击开了新标签（相关搜索/热搜常
+                # target=_blank）时工具此前还盯旧页截图。现在监听 context 级
+                # page 事件，新标签出现即自动切过去（note 告知，AI 也可 switch_tab 切回）
+                new_tab_box: "queue.Queue" = _queue.Queue()
+
+                def _on_new_tab(np):
+                    try:
+                        new_tab_box.put(np)
+                    except Exception:
+                        pass
+
+                try:
+                    page.context.on("page", _on_new_tab)
+                except Exception:
+                    pass
+
                 def _stdin_reader():
                     try:
                         for ln in sys.stdin:
@@ -2991,6 +3054,20 @@ def _vision_route(url: str, output_dir: Path, headed: bool = False, safe: bool =
                                                    if auto_interval_ms else "，自动截图关")),
                                     shoot=False)
                         continue
+                    # 新标签自动切换：上一步点击开了新标签（相关搜索/热搜类）→
+                    # 切过去再执行本条指令，截图/操作都落在新标签上
+                    try:
+                        np = new_tab_box.get_nowait()
+                        if np is not page and not np.is_closed():
+                            try:
+                                np.wait_for_load_state("domcontentloaded", timeout=8000)
+                            except Exception:
+                                pass
+                            page = np
+                            _emit_state(page, note=f"点击打开了新标签页，已自动切换：{page.url[:100]}",
+                                        shoot=False)
+                    except _queue.Empty:
+                        pass
                     # wait 钳到剩余预算：超时检查在指令间隙，长 wait 会拖爆总超时
                     remaining_ms = int((session_timeout_sec - (time.time() - session_start)) * 1000)
                     r = _vision_exec_action(page, cmd, output_dir, "vision",
@@ -3024,12 +3101,23 @@ def _vision_route(url: str, output_dir: Path, headed: bool = False, safe: bool =
                         continue
                     if act == "screenshot":
                         r = {"ok": True, "note": ""}
+                    # switch_tab 指令：真正切页由会话循环做（page 是循环局部变量）
+                    if r.get("_switch_to") is not None:
+                        target_pg = r["_switch_to"]
+                        if not target_pg.is_closed():
+                            page = target_pg
+                            r = {"ok": True,
+                                 "note": f"已切到标签 {page.url[:100]}（坐标基准变了，建议重新 elements）"}
+                        else:
+                            r = {"ok": False, "note": "目标标签已关闭，发 tabs 重新查清单"}
                     if act in ("goto", "reload", "back", "forward"):
                         page.wait_for_timeout(800)
                     # elements 指令的元素清单带进状态（视觉模型直接读坐标点按钮）
                     extra = {}
                     if r.get("elements"):
                         extra["elements"] = r["elements"]
+                    if r.get("tabs"):
+                        extra["tabs"] = r["tabs"]
                     if "data" in r:
                         extra["eval_result"] = r["data"]  # eval 结构化结果
                     extra = extra or None
@@ -3398,7 +3486,7 @@ def auto_save_url(
     vision_detail: str = "original",
     model_name: str = "",
     vision_timeout: int = 900,
-    vision_viewport: tuple = (800, 800),
+    vision_viewport: tuple = (1440, 900),
     cookie_file: str = "",
     cookies_from_browser: str = "",
     profile_dir: Optional[Path] = None,
@@ -4143,9 +4231,9 @@ def main(argv=None):
     )
     parser.add_argument(
         "--viewport",
-        default="800x800",
+        default="1440x900",
         metavar="WxH",
-        help="视觉会话视口尺寸（默认 800x800=DeepSeek 视觉原生分辨率，超范围官方压糊）。AI 也可在会话中发 {\"action\":\"viewport\",\"width\":W,\"height\":H} 动态改",
+        help="视觉会话视口尺寸（默认 1440x900：800x800 实测会裁掉页面底部按钮——完整性优先，清晰度由官方 384token 封顶兜底；DeepSeek 视觉原生 800x800 需要极致清晰时手动指定）。AI 也可在会话中发 {\"action\":\"viewport\",\"width\":W,\"height\":H} 动态改",
     )
     parser.add_argument(
         "--zip",
@@ -4236,13 +4324,13 @@ def main(argv=None):
             line_name = {"image": "图片", "audio": "音频", "file": "文件", "video": "视频", "text": "文本"}[mt]
             print(f"[选路] 识别为{line_name}目标，走 {method} 专用线（失败自动退回 chain）", file=sys.stderr)
         try:
-            # --viewport "WxH" 解析（vision 会话视口；坏格式回退默认 800x800）
+            # --viewport "WxH" 解析（vision 会话视口；坏格式回退默认 1440x900）
             try:
                 _vw, _vh = str(args.viewport).lower().split("x", 1)
                 vision_vp = (max(200, min(3840, int(_vw))), max(200, min(3840, int(_vh))))
             except (ValueError, AttributeError):
-                vision_vp = (800, 800)
-                print(f"[提示] --viewport 格式应为 WxH（如 1280x800），已回退默认 800x800",
+                vision_vp = (1440, 900)
+                print(f"[提示] --viewport 格式应为 WxH（如 1280x800），已回退默认 1440x900",
                       file=sys.stderr)
             data = auto_save_url(
                 args.url,

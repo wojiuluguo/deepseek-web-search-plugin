@@ -4,7 +4,7 @@ English | **[中文](README.zh-CN.md)**
 
 An [OpenClaw](https://github.com/openclaw) skill that gives DeepSeek real web search **and** an auto-save browser that downloads videos/audio/images/files from any webpage it opens — plus a vision mode for multimodal models (see a page, operate a page).
 
-> Current version **v1.15.0** (2026-08-22) · Author: user · [Changelog](#changelog)
+> Current version **v1.16.0** (2026-08-22) · Author: user · [Changelog](#changelog)
 
 <p align="center"><img src="assets/mascot.png" alt="deepseek-web-search mascot" width="220"></p>
 
@@ -197,6 +197,16 @@ deepseek-web-search-plugin/
 - App-funnel pages (only app-store redirects, no real files) honestly report `app_only: true` — the site itself offers no web download; this is not a script defect.
 
 ## Changelog
+
+### v1.16.0 (2026-08-22)
+
+Four fixes from real-world testing (viewport clipping / new tabs / gallery inconsistency / CJK typing note):
+
+- **Default viewport 800×800 → 1440×900**: 800px height actually clipped page bottoms (Baidu's search button cut in half) — completeness first, sharpness backstopped by the official 384-token cap; use `--viewport 800x800` for max fidelity.
+- **New-tab auto-tracking**: clicking target=_blank links (related-searches/hot-topics) now auto-switches the vision session to the new tab (with a note); new `tabs` (list tabs) and `switch_tab` commands. Verified live on Bing: click result → auto-switch → subsequent commands run on the new tab.
+- **Gallery harvest waits for images**: each scroll round now polls `img.complete` (up to 3s) before harvesting — fixes inconsistent gallery captures (7 vs 2 images): in-flight images were being skipped or marked failed.
+- **CJK typing note**: legacy coordinate `type` may output `???` for CJK — use the v1.15.0 precise typing `{"action":"type","selector":"...","text":"中文"}` (JS-value fallback when the keyboard channel fails); for pure HTTP CJK search use `search.py`.
+- Login walls (Doubao/Douyin/DeepSeek web) are site-enforced identity checks the tool does not bypass: `--profile` persistent login (v1.14.0) is the intended path.
 
 ### v1.15.0 (2026-08-22)
 
