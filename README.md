@@ -4,7 +4,7 @@ English | **[中文](README.zh-CN.md)**
 
 An [OpenClaw](https://github.com/openclaw) skill that gives DeepSeek real web search **and** an auto-save browser that downloads videos/audio/images/files from any webpage it opens — plus a vision mode for multimodal models (see a page, operate a page).
 
-> Current version **v1.13.0** (2026-08-22) · Author: user · [Changelog](#changelog)
+> Current version **v1.13.1** (2026-08-22) · Author: user · [Changelog](#changelog)
 
 <p align="center"><img src="assets/mascot.png" alt="deepseek-web-search mascot" width="220"></p>
 
@@ -130,6 +130,7 @@ direct → ytdlp → browser → cache → harvest → text   (+ ytdlp-with-cook
 | Scenario | Mechanism |
 |---|---|
 | Media pages | Real Chromium playback + network sniffing + 206-segment merging + blob/MSE capture + DOM/JSON harvesting |
+| Lazy-loaded SPA galleries (Xiaoheihe etc.) | Iterative scroll-harvest: scroll a step → wait for new images to mount → harvest the batch → repeat until no new items (≤30 rounds, 200-file cap); cross-origin CDN images fall back to direct HTTP download when in-page fetch is CORS-blocked |
 | Login walls (Douyin/Bilibili) | `--cookies <file>` (Netscape cookies.txt, exported via "Get cookies.txt" extension) or `--cookies-from-browser chrome/edge/firefox` — injected into yt-dlp, browser contexts, cache & harvest routes alike |
 | Douyin photo posts (`/note/`) | Auto-rerouted to `harvest` (yt-dlp doesn't support note URLs); output `note_auto_rerouted: true` |
 | File pages | Streaming direct download (8MB chunks); folder pages auto-collect ≤50 file links for batch download; filenames restored from Content-Disposition (CJK-safe) |
@@ -196,6 +197,15 @@ deepseek-web-search-plugin/
 - App-funnel pages (only app-store redirects, no real files) honestly report `app_only: true` — the site itself offers no web download; this is not a script defect.
 
 ## Changelog
+
+### v1.13.1 (2026-08-22)
+
+Lazy-loaded SPA gallery fix (reported: Xiaoheihe gallery pages only yielded ~3 visible thumbnails):
+
+- **Iterative scroll-harvest** replaces the old "jump-to-bottom + fixed 3 scrolls + single harvest": harvest now scrolls step-by-step, waits for newly mounted images, harvests each batch, and repeats until the page bottom yields no new items (or 4 consecutive empty rounds / 30-round cap / 200-file cap). IntersectionObserver-style lazy loading requires images to pass through the viewport — the old logic never triggered them.
+- **Cross-origin CDN fallback**: images on CDNs without CORS headers (e.g. `cdn.max-c.com`) used to fail silently in the in-page fetch; now they fall back to a direct script-side HTTP download with browser UA + page Referer.
+- **Small-image false-positive fix**: harvest mode no longer discards images <150KB as junk (gallery regulars are often 6–81KB); only icon/logo keyword URLs are filtered.
+- Regression: chain direct/ytdlp/browser/cache/harvest/text fallback all pass; Bing image-wall test harvests the full lazy grid (200 files).
 
 ### v1.13.0 (2026-08-22)
 

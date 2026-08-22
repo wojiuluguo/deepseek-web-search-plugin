@@ -4,7 +4,7 @@
 
 OpenClaw Skill：让 DeepSeek 模型能搜索、会搜索、并且"该搜就搜"，还能自动下载网页里的视频/音频/图片/文件，多模态模型还能"看页面+操作页面"。
 
-> 当前版本 **v1.13.0**（2026-08-22）· 作者：user · [更新记录](#更新记录)
+> 当前版本 **v1.13.1**（2026-08-22）· 作者：user · [更新记录](#更新记录)
 
 <p align="center"><img src="assets/mascot.png" alt="deepseek-web-search 吉祥物" width="220"></p>
 
@@ -132,6 +132,7 @@ direct → ytdlp → browser → cache → harvest → text   （带了 cookie �
 | 场景 | 机制 |
 |---|---|
 | 媒体页面 | 真实 Chromium 播放 + 网络嗅探 + 206 分段合并 + blob/MSE 抓取 + DOM/JSON 收割 |
+| SPA 懒加载图集（小黑盒等） | 迭代滚动收割：逐段滚→等新图挂载→收割本轮→循环到无新增（≤30 轮、200 张封顶）；跨域 CDN 图被 CORS 拦时自动降级脚本直连 |
 | 登录墙（抖音/B站） | `--cookies <文件>`（Netscape cookies.txt，"Get cookies.txt" 扩展导出）或 `--cookies-from-browser chrome/edge/firefox`（直接读本机浏览器登录态）——yt-dlp、浏览器、cache、harvest 全路线生效 |
 | 抖音图文帖（`/note/`） | 自动转 harvest 收割图集原图（yt-dlp 不支持 note URL），输出 `note_auto_rerouted: true` |
 | 文件页 | 直链流式下载（8MB 分块）；文件夹页自动收集 ≤50 个文件链接批量下；文件名取 Content-Disposition 还原中文名 |
@@ -198,6 +199,15 @@ deepseek-web-search-plugin/
 - APP 引流陷阱页（只跳应用商店无真文件）会如实报 `app_only: true`，这是站点本身不提供网页端下载，非脚本缺陷。
 
 ## 更新记录
+
+### v1.13.1（2026-08-22）
+
+SPA 懒加载图集修复（用户反馈：小黑盒图集只抓到 3 张可见缩略图）：
+
+- **迭代滚动收割**替换旧"跳到底+固定滚 3 次+一次性收割"：harvest 路线现在逐段滚动→等新图挂载→收割本轮新图→循环，直到滚到底无新增（或连续 4 轮空 / 30 轮上限 / 200 张封顶）。IntersectionObserver 型懒加载必须让图片逐段经过视口，旧逻辑根本触发不了。
+- **跨域 CDN 降级**：无 CORS 头的 CDN 图（如 `cdn.max-c.com`）此前在页面 fetch 里静默失败；现在自动降级脚本侧直连（带浏览器 UA + 页面 Referer）。
+- **小图误判修复**：图集收割不再把 <150KB 的图当垃圾（图集正片常在 6–81KB）；只按 icon/logo 关键词滤真图标。
+- 回归：chain 六路兜底全过；Bing 图墙实测收满整个懒加载网格（200 张）。
 
 ### v1.13.0（2026-08-22）
 

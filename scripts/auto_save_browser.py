@@ -443,7 +443,9 @@ def _browser_launch_args(safe: bool) -> List[str]:
     return args
 
 
-def _is_junk_resource(url: str, content_type: str, size: int) -> bool:
+def _is_junk_resource(url: str, content_type: str, size: int, size_strict: bool = True) -> bool:
+    """判定垃圾资源。size_strict=False 时跳过尺寸阈值（图集收割场景：
+    用户点名要图，几十 KB 的正片图不是垃圾；只按扩展名/URL 关键词滤真图标）。"""
     ct = (content_type or "").lower()
     path = urllib.parse.urlparse(url).path.lower()
     ext = Path(path).suffix
@@ -451,6 +453,8 @@ def _is_junk_resource(url: str, content_type: str, size: int) -> bool:
         return True
     if any(h in url.lower() for h in JUNK_URL_HINTS):
         return True
+    if not size_strict:
+        return False
     # 小图片基本都是封面/图标，不是内容
     if ct.startswith("image/") and size < 150 * 1024:
         return True
@@ -1283,6 +1287,31 @@ def _page_fetch(page, url: str) -> Optional[Dict]:
         return None
 
 
+def _http_fetch_media(url: str, page_url: str = "", timeout: int = 20) -> Optional[Dict]:
+    """脚本侧 HTTP 直下媒体（收割降级路线）：页面上下文 fetch 被跨域 CORS 拦时用。
+    带浏览器 UA + 来源页 Referer（防热链基本够用），返回 {b64,size,ct} 或 None。"""
+    import base64
+
+    try:
+        headers = {
+            "User-Agent": random.choice(USER_AGENTS),
+            "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        }
+        if page_url:
+            parsed = urllib.parse.urlparse(page_url)
+            headers["Referer"] = f"{parsed.scheme}://{parsed.netloc}/"
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = resp.read()
+            ct = resp.headers.get("Content-Type", "")
+        if not data or len(data) > 80 * 1024 * 1024:
+            return None
+        return {"b64": base64.b64encode(data).decode("ascii"), "size": len(data), "ct": ct}
+    except Exception:
+        return None
+
+
 def _extract_shell_redirect(html_text: str) -> Optional[str]:
     """从跳转壳页 HTML 提取真实目标 URL（分享链接常见：api.xxx/share?link_id= 返回壳页）。
     识别 meta refresh / JS location 跳转 / redirect 类 JSON 字段 / og:url。拿不到返回 None。"""
@@ -1390,6 +1419,60 @@ def _wait_for_render(page, min_text: int = 50, max_wait_sec: float = 10.0) -> bo
     return False
 
 
+def _harvest_lazy_all(page, url: str, output_dir: Path, allowed_kinds: set, seen: set,
+                      save_junk: bool, safe: bool = False,
+                      max_rounds: int = 30, stall_limit: int = 4,
+                      step_px: int = 1400, pause_ms: int = 600,
+                      max_total: int = 200) -> List[Dict]:
+    """迭代滚动收割：逐段滚动→等懒加载挂载→收割本轮新图，直到收敛。
+
+    修 SPA 图集抓不全（小黑盒这类）：懒加载图集初始只挂视口附近几张，
+    旧逻辑"跳到底+固定滚3次+一次性收割"拿不到中段图片——
+    IntersectionObserver 型懒加载必须让元素逐段经过视口才触发请求。
+    收敛条件（满足其一）：滚到底且本轮无新增 / 连续 stall_limit 轮无新增 / 达轮数上限。
+    每轮收割增量入库（seen 去重防重复下载），总收录 max_total 封顶防失控。"""
+    saved_all: List[Dict] = []
+    stall = 0
+    for _ in range(max_rounds):
+        if len(saved_all) >= max_total:
+            break
+        _trigger_lazy_media(page)
+        batch = _harvest_dom_media(page, url, output_dir, allowed_kinds, seen,
+                                   save_junk, limit=min(120, max_total - len(saved_all)),
+                                   safe=safe)
+        saved_all.extend(batch)
+        stall = 0 if batch else stall + 1
+        # 逐段滚动：模拟人翻页，让各段图片依次进入视口触发懒加载
+        try:
+            y = page.evaluate("window.scrollY || document.documentElement.scrollTop || 0") or 0
+            ph = page.evaluate(
+                "Math.max(document.documentElement.scrollHeight,"
+                "document.body ? document.body.scrollHeight : 0)"
+            ) or 0
+            vh = page.evaluate("window.innerHeight") or 0
+            page.evaluate(f"window.scrollTo(0, {y + step_px})")
+            page.wait_for_timeout(pause_ms)
+            y2 = page.evaluate("window.scrollY || document.documentElement.scrollTop || 0") or 0
+        except Exception:
+            break
+        # 到底（位置不再前进或已贴底）且无新货 → 收敛；中部连续 stall_limit 轮空 → 也收敛
+        at_bottom = (y2 + vh) >= (ph - 80) or y2 <= y
+        if (at_bottom and stall >= 1) or stall >= stall_limit:
+            break
+    # 尾轮：停稳后再收一次（最后一段新挂载的图）
+    try:
+        page.wait_for_timeout(400)
+        _trigger_lazy_media(page)
+        tail = _harvest_dom_media(page, url, output_dir, allowed_kinds, seen,
+                                  save_junk, limit=min(120, max(0, max_total - len(saved_all))),
+                                  safe=safe)
+        saved_all.extend(tail)
+        page.evaluate("window.scrollTo(0, 0)")
+    except Exception:
+        pass
+    return saved_all
+
+
 def _harvest_dom_media(
     page, url: str, output_dir: Path, allowed_kinds: set, seen: set, save_junk: bool,
     limit: int = 40, safe: bool = False,
@@ -1440,6 +1523,10 @@ def _harvest_dom_media(
         seen.add(u)
         item = _page_fetch(page, u)
         if not item:
+            # 页面 fetch 被拦（跨域 CDN 无 CORS 头，如小黑盒 cdn.max-c.com）→
+            # 降级脚本侧直连：带浏览器 UA + 页面 Referer，公开 CDN 基本都放行
+            item = _http_fetch_media(u, page_url=url)
+        if not item:
             continue
         data = base64.b64decode(item["b64"])
         if len(data) < 2048:
@@ -1455,7 +1542,7 @@ def _harvest_dom_media(
         kind = _media_kind(u, ct) or kind
         if kind not in allowed_kinds:
             continue
-        if kind == "image" and _is_junk_resource(u, ct, len(data)):
+        if kind == "image" and _is_junk_resource(u, ct, len(data), size_strict=False):
             continue
         # 安全模式：落盘白名单 + 大小上限（URL 里的扩展名必须过白名单才落盘）
         if safe and _safe_save_reason(_safe_filename(u, ct, fetched), len(data)):
@@ -3152,11 +3239,9 @@ def auto_save_url(
                             followed_redirect = final_url
                         # JS 渲染等待：SPA 画廊/图库页媒体是 JS 挂载的，空白期收割=0
                         _wait_for_render(page)
-                        _trigger_lazy_media(page)
-                        for _ in range(3):
-                            page.mouse.wheel(0, 1500)
-                            page.wait_for_timeout(500)
-                        saved = _harvest_dom_media(page, final_url, output_dir, allowed_kinds, seen, save_junk, safe=safe)
+                        # 迭代滚动收割：SPA 图集懒加载逐段触发（小黑盒这类只挂视口几张的页面）
+                        saved = _harvest_lazy_all(page, final_url, output_dir, allowed_kinds,
+                                                  seen, save_junk, safe=safe)
                         # 跳转壳页跟进：0 收割时提取真实目标 URL 再收割一轮（分享链接常见）
                         if not saved:
                             try:
@@ -3170,11 +3255,8 @@ def auto_save_url(
                                     page.wait_for_load_state("networkidle", timeout=8000)
                                 except Exception:
                                     pass
-                                _trigger_lazy_media(page)
-                                for _ in range(3):
-                                    page.mouse.wheel(0, 1500)
-                                    page.wait_for_timeout(500)
-                                saved = _harvest_dom_media(page, real_target, output_dir, allowed_kinds, seen, save_junk, safe=safe)
+                                saved = _harvest_lazy_all(page, real_target, output_dir,
+                                                          allowed_kinds, seen, save_junk, safe=safe)
                                 followed_redirect = real_target
                     finally:
                         if browser is not None:

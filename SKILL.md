@@ -1,7 +1,7 @@
 ---
 name: deepseek-web-search
 description: DeepSeek 联网搜索技能。遇到实时信息、事实核查、新闻、价格、代码报错、未知名词或用户说“搜一下”时，必须使用本技能搜索并附来源。
-version: 1.13.0
+version: 1.13.1
 updated: 2026-08-22
 author: user
 license: MIT
@@ -60,6 +60,7 @@ tags: [web, search, deepseek, 联网, 搜索]
 | 抖音/B站报 `需要 cookie`/`Sign in to confirm`/登录墙空壳（video_layout=null、无视频流） | 加 `--cookies-from-browser chrome`（本机 Chrome 登录过）或 `--cookies cookies.txt`；chain 模式带 cookie 全链失败还会自动用 cookie 复试一次 |
 | 抖音 `/note/` 图文帖报 `Unsupported URL` | 不用处理——v1.13.0 起自动转 harvest 收割图集原图（`note_auto_rerouted: true`）；原图仍空说明图集需登录，加 cookie 再试 |
 | 抖音长视频/直播只下到 1.3KB+封面（流没放行） | 站点按视频"看心情"放行，不是工具 bug；如实报告 + 建议 cookie 重试或换 `--method browser` |
+| SPA 图集只抓到几张可见图（懒加载抓不全） | v1.13.1 已修：harvest 路线自动迭代滚动收割（逐段滚→收新图→直到无新增）；仍不全时换 `--method harvest` 显式指定再试 |
 
 ## Token 经济（DeepSeek 上下文管理）
 
@@ -289,6 +290,8 @@ cookie 全线生效：yt-dlp 路线（`cookiefile`/`cookiesfrombrowser`）、浏
 不指定 `--method` 时自动选路：视频站/媒体直链→chain（原路不变）；图片站/音乐站/`--media-type` 单选的照片页音频页→harvest 专用线（DOM 收割+页面上下文下载，快），颗粒无收自动退回 chain 再试；文件（zip/pdf/docx 等直链，或 `--media-type file` / 关键词含"文件/压缩包/文档/pdf"）→files 专用线。显式指定 `--method` 时完全按指定的走。**视频站域名一票否决**：抖音/B站等"视频流+音频流分离"的站点无论 `--media-type` 怎么单选都走视频路（yt-dlp 双流合并），页面里的音频是视频伴音，绝不能拆开只抓半条流；纯图片/纯音频收割时也跳过 m4s/ts 分离流分段防残件。
 
 **抖音图文帖自动转路**（v1.13.0）：`/note/` URL（图文帖）yt-dlp 直接报 Unsupported URL，工具自动识别并先转 harvest 收割图集原图（输出 `note_auto_rerouted: true`，method 记 `chain->harvest(note)`）；harvest 也空（图集被限制）时 chain 继续走兜底链不中断。
+
+**迭代滚动收割**（v1.13.1）：SPA 图集页（小黑盒等）懒加载只挂视口附近几张图，旧逻辑"跳到底+固定滚 3 次+一次性收割"抓不全。现在 harvest 路线改为**逐段滚动→等新图挂载→收割本轮新图**的迭代循环，直到滚到底无新图/连续 4 轮无新增/达 30 轮上限（总量 200 封顶防失控）。同时修了两个连带缺口：跨域 CDN 图片（无 CORS 头）页面 fetch 被拦时自动降级脚本侧直连（带 UA+Referer）；图集场景小图（<150KB）不再被误判垃圾——只有 icon/logo 关键词型才滤。
 
 **files 文件专用线**（v1.6.0）：文件直链→HTTP 流式直下（8MB 分块不吃内存，文件名优先取 Content-Disposition，网页壳自动拒存）；文件夹/下载页→打开页面收集所有文件链接（a[href] 带文件扩展名，上限 50 个）逐个下载到独立子文件夹 `files_<时间戳>/`，默认保留散文件；加 `--zip` 则全部下完打包成单个 zip 并清掉散文件（合并模式）。`--safe` 下可执行文件（exe/bat 等）下载前直接拦截。
 
