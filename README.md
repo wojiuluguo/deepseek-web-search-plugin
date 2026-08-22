@@ -197,6 +197,12 @@ deepseek-web-search-plugin/
 - App-funnel pages (only app-store redirects, no real files) honestly report `app_only: true` — the site itself offers no web download; this is not a script defect.
 - **Vision mode (`--method vision`, headless browser session) is billed per screenshot and costs a nontrivial amount — not recommended for general users**; all other routes (search/download/text) are completely free.
 
+## Development & Testing
+
+- **Development assistant**: code written and maintained by **Zhipu 5.3** (GLM)
+- **Testing AIs**: vision-session capabilities cross-tested live with **MiniMax M3** and the **DeepSeek multimodal model** (deepseek-v4-flash-vision-exp)
+- **Cost note**: Vision mode (`--method vision`, headless browser session) is billed per screenshot and costs a nontrivial amount — not recommended for general users; all other routes (search/download/text) are completely free
+
 ## Changelog
 
 ### v1.21.0 (2026-08-23)
