@@ -4,7 +4,7 @@
 
 OpenClaw Skill：让 DeepSeek 模型能搜索、会搜索、并且"该搜就搜"，还能自动下载网页里的视频/音频/图片/文件，多模态模型还能"看页面+操作页面"。
 
-> 当前版本 **v1.12.6**（2026-08-22）· 作者：user · [更新记录](#更新记录)
+> 当前版本 **v1.13.0**（2026-08-22）· 作者：user · [更新记录](#更新记录)
 
 <p align="center"><img src="assets/mascot.png" alt="deepseek-web-search 吉祥物" width="220"></p>
 
@@ -74,6 +74,10 @@ python scripts/cross_search.py --query "OpenClaw" --mega --copies 3 --rounds 2 -
 # 打开网页自动保存视频（抖音/B站等）
 python scripts/auto_save_browser.py --url "https://v.douyin.com/xxxx" --json
 
+# 登录墙站点（抖音/B站）：带登录 cookie 才放行视频流
+python scripts/auto_save_browser.py --url "https://v.douyin.com/xxxx" --cookies "D:/cookies.txt" --json
+python scripts/auto_save_browser.py --url "https://v.douyin.com/xxxx" --cookies-from-browser chrome --json
+
 # 搜索后自动打开第一个视频结果并保存
 python scripts/auto_save_browser.py --query "抖音 猫 视频" --auto --json
 
@@ -119,15 +123,17 @@ python scripts/auto_save_browser.py --url "..." --method vision --model deepseek
 
 ## 下载可靠性设计（auto_save_browser.py）
 
-`chain` 模式按序自动降级，哪个成功用哪个：
+`chain` 模式按序自动降级，哪个成功用哪个（v1.13.0 扩容：5 路 → 6 路 + cookie 复试）：
 
 ```text
-direct → ytdlp → browser → cache → text
+direct → ytdlp → browser → cache → harvest → text   （带了 cookie 且全链失败时追加 ytdlp+cookies 复试）
 ```
 
 | 场景 | 机制 |
 |---|---|
 | 媒体页面 | 真实 Chromium 播放 + 网络嗅探 + 206 分段合并 + blob/MSE 抓取 + DOM/JSON 收割 |
+| 登录墙（抖音/B站） | `--cookies <文件>`（Netscape cookies.txt，"Get cookies.txt" 扩展导出）或 `--cookies-from-browser chrome/edge/firefox`（直接读本机浏览器登录态）——yt-dlp、浏览器、cache、harvest 全路线生效 |
+| 抖音图文帖（`/note/`） | 自动转 harvest 收割图集原图（yt-dlp 不支持 note URL），输出 `note_auto_rerouted: true` |
 | 文件页 | 直链流式下载（8MB 分块）；文件夹页自动收集 ≤50 个文件链接批量下；文件名取 Content-Disposition 还原中文名 |
 | 点击下载跳 APP | `--click-download` 五级降级链：按钮直链/scheme 解码 → 点击+网络嗅探（含新标签页）→ 原生下载事件 → 手机 UA 伪装 → 页面上下文 fetch |
 | APP 引流陷阱 | 全部"下载链接"都是应用商店时输出 `app_only: true`，如实报告不硬造 |
@@ -192,6 +198,15 @@ deepseek-web-search-plugin/
 - APP 引流陷阱页（只跳应用商店无真文件）会如实报 `app_only: true`，这是站点本身不提供网页端下载，非脚本缺陷。
 
 ## 更新记录
+
+### v1.13.0（2026-08-22）
+
+登录墙下载 + 兜底链扩容：
+
+- **新增 `--cookies <文件>` / `--cookies-from-browser chrome|edge|firefox`**：抖音/B站类登录墙站点带登录态下载。支持 Netscape cookies.txt（"Get cookies.txt" 浏览器扩展导出）或直接读本机已登录的浏览器。全线生效：yt-dlp（`cookiefile`/`cookiesfrombrowser`）、浏览器与 cache 上下文（`add_cookies` 注入）、harvest、note 转路。
+- **chain 兜底链扩容 5 → 6 路**：`direct → ytdlp → browser → cache → harvest → text`，一步失败自动换下一个，首个成功立即返回；每步成败记录在 `attempts` 数组；单路崩溃（页面打不开/缺 Playwright）不再拖死整链。带了 cookie 且全链失败时，最后追加 `ytdlp+cookies` 复试一搏。
+- **抖音图文帖（`/note/`）自动转路**：yt-dlp 对 note URL 直接报 Unsupported URL——现在自动识别并转 harvest 收割图集原图（输出 `note_auto_rerouted: true`）；harvest 也空时 chain 继续走兜底链不中断。
+- `own_search.py download` 透传 `--method` / `--cookies` / `--cookies-from-browser`。
 
 ### v1.12.6（2026-08-22）
 

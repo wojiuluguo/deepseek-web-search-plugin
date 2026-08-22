@@ -315,6 +315,12 @@ def cmd_download(args):
         cmd += ["--output-dir", args.output_dir]
     if getattr(args, "safe", False):
         cmd.append("--safe")
+    if getattr(args, "method", ""):
+        cmd += ["--method", args.method]
+    if getattr(args, "cookies", ""):
+        cmd += ["--cookies", args.cookies]
+    if getattr(args, "cookies_from_browser", ""):
+        cmd += ["--cookies-from-browser", args.cookies_from_browser]
     try:
         # 大文件+chain 多路兜底可能很久，给 30 分钟上限防挂死
         proc = subprocess.run(cmd, capture_output=True, text=True,
@@ -434,6 +440,9 @@ def main(argv=None):
     p_download.add_argument("--query", default="", help="搜索并自动下载第一个视频类结果")
     p_download.add_argument("--output-dir", default="", help="保存目录")
     p_download.add_argument("--safe", action="store_true", help="安全模式：沙箱+拦截挖矿/危险文件+落盘白名单（可疑站点用）")
+    p_download.add_argument("--method", default="", help="下载方法：chain(多路兜底)/direct/browser/cache/ytdlp/auto/harvest/files/text（默认自动选路）")
+    p_download.add_argument("--cookies", default="", help="Netscape cookies.txt 路径，登录墙站点（抖音/B站）带登录态下载")
+    p_download.add_argument("--cookies-from-browser", default="", choices=["chrome", "edge", "firefox"], help="直接读本机浏览器登录 cookie（免导出）")
     p_download.set_defaults(func=cmd_download)
 
     p_seed = sub.add_parser("seed", help="用外部搜索发现URL，再抓进自己的索引")

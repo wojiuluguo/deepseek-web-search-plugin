@@ -4,7 +4,7 @@ English | **[中文](README.zh-CN.md)**
 
 An [OpenClaw](https://github.com/openclaw) skill that gives DeepSeek real web search **and** an auto-save browser that downloads videos/audio/images/files from any webpage it opens — plus a vision mode for multimodal models (see a page, operate a page).
 
-> Current version **v1.12.6** (2026-08-22) · Author: user · [Changelog](#changelog)
+> Current version **v1.13.0** (2026-08-22) · Author: user · [Changelog](#changelog)
 
 <p align="center"><img src="assets/mascot.png" alt="deepseek-web-search mascot" width="220"></p>
 
@@ -72,6 +72,10 @@ python scripts/cross_search.py --query "OpenClaw" --mega --copies 3 --rounds 2 -
 # Open a webpage and auto-save the video (Douyin/Bilibili etc.)
 python scripts/auto_save_browser.py --url "https://v.douyin.com/xxxx" --json
 
+# Login-wall sites (Douyin/Bilibili): attach login cookies for video streams
+python scripts/auto_save_browser.py --url "https://v.douyin.com/xxxx" --cookies "D:/cookies.txt" --json
+python scripts/auto_save_browser.py --url "https://v.douyin.com/xxxx" --cookies-from-browser chrome --json
+
 # Search, then auto-open the first video result and save it
 python scripts/auto_save_browser.py --query "cat videos" --auto --json
 
@@ -117,15 +121,17 @@ Adapts the official `deepseek-v4-flash-vision-exp` multimodal model (released 20
 
 ## Download Reliability Design (auto_save_browser.py)
 
-`chain` mode tries each method in order and uses the first one that succeeds:
+`chain` mode tries each method in order and uses the first one that succeeds (v1.13.0: expanded from 5 to 6 routes + cookie retry):
 
 ```text
-direct → ytdlp → browser → cache → text
+direct → ytdlp → browser → cache → harvest → text   (+ ytdlp-with-cookies retry if cookies were provided)
 ```
 
 | Scenario | Mechanism |
 |---|---|
 | Media pages | Real Chromium playback + network sniffing + 206-segment merging + blob/MSE capture + DOM/JSON harvesting |
+| Login walls (Douyin/Bilibili) | `--cookies <file>` (Netscape cookies.txt, exported via "Get cookies.txt" extension) or `--cookies-from-browser chrome/edge/firefox` — injected into yt-dlp, browser contexts, cache & harvest routes alike |
+| Douyin photo posts (`/note/`) | Auto-rerouted to `harvest` (yt-dlp doesn't support note URLs); output `note_auto_rerouted: true` |
 | File pages | Streaming direct download (8MB chunks); folder pages auto-collect ≤50 file links for batch download; filenames restored from Content-Disposition (CJK-safe) |
 | "Click to download" → app redirect | `--click-download` 5-level fallback chain: button direct links/scheme decoding → programmatic click + network sniffing (incl. new tabs) → native download events → mobile UA spoofing → page-context fetch |
 | App-store funnels | If every "download link" points to an app store, outputs `app_only: true` — honest reporting, no fake results |
@@ -190,6 +196,15 @@ deepseek-web-search-plugin/
 - App-funnel pages (only app-store redirects, no real files) honestly report `app_only: true` — the site itself offers no web download; this is not a script defect.
 
 ## Changelog
+
+### v1.13.0 (2026-08-22)
+
+Login-wall downloads + bigger fallback chain:
+
+- **New: `--cookies <file>` / `--cookies-from-browser chrome|edge|firefox`** — attach login state for Douyin/Bilibili-style paywall/login sites. Netscape cookies.txt (exported via the "Get cookies.txt" browser extension) or read directly from a locally logged-in browser. Injected into every route: yt-dlp (`cookiefile`/`cookiesfrombrowser`), browser & cache contexts (`add_cookies`), harvest, and the note-reroute.
+- **chain fallback expanded 5 → 6 routes**: `direct → ytdlp → browser → cache → harvest → text`; each failed step automatically moves to the next, first success returns immediately; per-step outcome recorded in the `attempts` array; a single crashed route (page won't open, Playwright missing) no longer kills the chain. With cookies provided and everything failed, an extra `ytdlp+cookies` retry fires as the last resort.
+- **Douyin photo posts (`/note/`) auto-reroute**: yt-dlp reports Unsupported URL on note links — now auto-detected and rerouted to `harvest` for the full-resolution image set (`note_auto_rerouted: true`); if harvest comes back empty, chain continues instead of failing.
+- `own_search.py download` now passes through `--method` / `--cookies` / `--cookies-from-browser`.
 
 ### v1.12.6 (2026-08-22)
 

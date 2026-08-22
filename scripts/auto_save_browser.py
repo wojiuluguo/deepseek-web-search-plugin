@@ -485,8 +485,61 @@ def _save_bytes(data: bytes, output_dir: Path, url: str, content_type: str, inde
     return path
 
 
-def _download_with_ytdlp(url: str, output_dir: Path, safe: bool = False):
-    """Try yt-dlp first. Returns (saved_list, error_string)."""
+def _parse_netscape_cookies(cookie_file: str):
+    """解析 Netscape cookies.txt（浏览器扩展导出的标准格式）→ Playwright add_cookies 列表。
+    返回 (cookies, error)：error 非 None 表示文件不可用（不存在/格式坏/没有有效行）。"""
+    p = Path(cookie_file)
+    if not p.is_file():
+        return None, f"cookies 文件不存在: {cookie_file}"
+    cookies = []
+    try:
+        for ln in p.read_text(encoding="utf-8-sig", errors="ignore").splitlines():
+            ln = ln.strip()
+            if not ln or ln.startswith("#") or ln.startswith("//"):
+                continue
+            parts = ln.split("\t")
+            if len(parts) != 7:
+                continue
+            domain, _, path_s, secure, expires, name, value = parts
+            try:
+                exp = int(expires)
+            except ValueError:
+                exp = -1
+            if not name:
+                continue
+            c = {
+                "name": name, "value": value,
+                "domain": domain if domain.startswith(".") else "." + domain,
+                "path": path_s or "/",
+                "secure": secure.upper() == "TRUE",
+            }
+            # expires=0/-1 → 会话 cookie，Playwright 用 -1 表示
+            c["expires"] = exp if exp > 0 else -1
+            cookies.append(c)
+    except Exception as exc:
+        return None, f"cookies 文件读取失败: {exc}"
+    if not cookies:
+        return None, "cookies 文件里没有有效行（需要 Netscape 格式，'Get cookies.txt' 扩展导出的就是）"
+    return cookies, None
+
+
+def _add_cookies_to_context(context, cookie_file: str):
+    """把 cookies.txt 注入浏览器上下文。返回 (True, n) 或 (False, error)。"""
+    cookies, err = _parse_netscape_cookies(cookie_file)
+    if err:
+        return False, err
+    try:
+        context.add_cookies(cookies)
+        return True, len(cookies)
+    except Exception as exc:
+        return False, f"cookie 注入失败: {exc}"
+
+
+def _download_with_ytdlp(url: str, output_dir: Path, safe: bool = False,
+                         cookie_file: str = "", cookies_from_browser: str = ""):
+    """Try yt-dlp first. Returns (saved_list, error_string).
+    cookie_file：Netscape cookies.txt 路径；cookies_from_browser：chrome/edge/firefox，
+    两者都给时 cookie_file 优先（文件可以离线管理，浏览器 cookie 要本机登录过）。"""
     try:
         import yt_dlp
     except ImportError:
@@ -501,6 +554,15 @@ def _download_with_ytdlp(url: str, output_dir: Path, safe: bool = False):
         "format": "bestvideo+bestaudio/best",
         "merge_output_format": "mp4",
     }
+    # 登录态 cookie：抖音/B站等强制登录才给视频流的站点靠这个过墙
+    if cookie_file:
+        if Path(cookie_file).is_file():
+            ydl_opts["cookiefile"] = cookie_file
+        else:
+            return [], f"cookies 文件不存在: {cookie_file}"
+    elif cookies_from_browser:
+        # yt-dlp 原生支持从浏览器配置直接读（免导出，但本机浏览器得登录过）
+        ydl_opts["cookiesfrombrowser"] = (cookies_from_browser,)
     # 关键：yt-dlp 合并 B站等分离音视频流时用它自己的探测找 ffmpeg（不看我们的
     # _find_tool），找不到就中止。把探测结果显式喂给它——ffmpeg 同目录自带 ffprobe。
     ffmpeg = _ffmpeg_path()
@@ -2917,6 +2979,8 @@ def auto_save_url(
     model_name: str = "",
     vision_timeout: int = 900,
     vision_viewport: tuple = (800, 800),
+    cookie_file: str = "",
+    cookies_from_browser: str = "",
 ) -> Dict:
     """
     核心逻辑：
@@ -2940,19 +3004,47 @@ def auto_save_url(
     if not allowed_kinds:
         allowed_kinds = {"video", "audio", "image"}
 
+    # 抖音图文帖（/note/…）预判：yt-dlp 不支持 note URL（直接 Unsupported URL 报错），
+    # 自动转 harvest 图集收割——原图走页面上下文下载，不再白撞一墙
+    if "/note/" in url and method in ("chain", "auto", "ytdlp"):
+        try:
+            r = auto_save_url(url, output_dir, wait_seconds, "harvest", headed, max_wait,
+                              auto_wait, save_junk, keep_segments, media_types, safe,
+                              cookie_file=cookie_file,
+                              cookies_from_browser=cookies_from_browser)
+            if r.get("saved"):
+                r["method"] = f"{method}->harvest(note)"
+                r["note_auto_rerouted"] = True
+                return r
+            # harvest 也空（图集被限制）：chain 继续走原链兜底，别直接失败
+            if method in ("auto", "ytdlp"):
+                return r
+        except Exception:
+            pass
+
     # chain：按顺序尝试多个下载/缓存方式，哪个成功用哪个；text 兜底保证纯文本页也能存。
     if method == "chain":
         attempts = []
         last_result = None
-        for m in ("direct", "ytdlp", "browser", "cache", "text"):
+        # 兜底链扩容：direct → ytdlp → browser → cache → harvest(媒体页兜底) → text
+        # 有 cookie 时追加 ytdlp+cookie 复试（第一遍未带 cookie 的 ytdlp 失败多半是登录墙）
+        chain_methods = ["direct", "ytdlp", "browser", "cache", "harvest", "text"]
+        for m in chain_methods:
             try:
                 if m == "text":
                     # chain 兜底的 text 只做单页快速正文（目录逐章是 text 专用线的活，别拖死 chain）
                     result = auto_save_url(url, output_dir, wait_seconds, m, headed, max_wait,
                                            auto_wait, save_junk, keep_segments, media_types, safe,
                                            max_chapters=1, allow_chapters=False)
+                elif m == "harvest":
+                    # harvest 在 chain 里只收图片/音频（视频已由 browser/cache 干过一遍）
+                    result = auto_save_url(url, output_dir, wait_seconds, m, headed, max_wait,
+                                           auto_wait, save_junk, keep_segments, "image,audio", safe)
                 else:
-                    result = auto_save_url(url, output_dir, wait_seconds, m, headed, max_wait, auto_wait, save_junk, keep_segments, media_types, safe)
+                    result = auto_save_url(url, output_dir, wait_seconds, m, headed, max_wait,
+                                           auto_wait, save_junk, keep_segments, media_types, safe,
+                                           cookie_file=cookie_file,
+                                           cookies_from_browser=cookies_from_browser)
             except Exception as exc:
                 # 某一环崩了（页面打不开/playwright 缺失等）不让 chain 整体死掉，继续试下一种
                 result = {"saved": [], "count": 0, "method": m, "yt_dlp_error": f"crash: {exc}"}
@@ -2968,6 +3060,19 @@ def auto_save_url(
                 result["method"] = f"chain->{m}"
                 return result
             last_result = result
+        # 全链失败且带 cookie 参数：ytdlp+cookie 最后一搏（前面各环没吃到 cookie 的场景）
+        if cookie_file or cookies_from_browser:
+            try:
+                saved, yt_err = _download_with_ytdlp(url, output_dir, safe,
+                                                     cookie_file=cookie_file,
+                                                     cookies_from_browser=cookies_from_browser)
+                attempts.append({"method": "ytdlp+cookies", "count": len(saved), "error": yt_err})
+                if saved:
+                    return {"mode": "url", "source_url": url, "output_dir": str(output_dir),
+                            "saved": saved, "count": len(saved), "method": "chain->ytdlp+cookies",
+                            "attempts": attempts}
+            except Exception as exc:
+                attempts.append({"method": "ytdlp+cookies", "count": 0, "error": f"crash: {exc}"})
         if last_result is None:
             last_result = {"saved": [], "count": 0, "method": "chain"}
         last_result["attempts"] = attempts
@@ -3028,6 +3133,12 @@ def auto_save_url(
                             **({"service_workers": "block"} if safe else {}),
                         )
                         context.add_init_script(STEALTH_JS)
+                        # 登录态注入：抖音 note 图集原图等登录墙资源，带 cookie 才放行
+                        if cookie_file:
+                            ok_c, c_info = _add_cookies_to_context(context, cookie_file)
+                            sys.stderr.write(
+                                f"[cookies] harvest 注入{str(c_info) + ' 条' if ok_c else '失败: ' + str(c_info)}\n"
+                            )
                         page = context.new_page()
                         blocked = _setup_safe_mode(context, page) if safe else {}
                         page.goto(url, wait_until="domcontentloaded", timeout=30000)
@@ -3104,7 +3215,9 @@ def auto_save_url(
 
     # auto / ytdlp：先试 yt-dlp 直接下载，失败再降级到浏览器。
     if method in ("ytdlp", "auto"):
-        yt_saved, yt_error = _download_with_ytdlp(url, output_dir, safe)
+        yt_saved, yt_error = _download_with_ytdlp(url, output_dir, safe,
+                                                  cookie_file=cookie_file,
+                                                  cookies_from_browser=cookies_from_browser)
         if yt_saved:
             out = {
                 "mode": "url",
@@ -3157,6 +3270,12 @@ def auto_save_url(
                 **({"service_workers": "block"} if safe else {}),
             )
             context.add_init_script(STEALTH_JS)
+            # 登录态注入：抖音/B站登录墙站点，带 cookie 浏览器才放行视频流
+            if cookie_file:
+                ok_c, c_info = _add_cookies_to_context(context, cookie_file)
+                sys.stderr.write(
+                    f"[cookies] 浏览器路线注入{str(c_info) + ' 条' if ok_c else '失败: ' + str(c_info)}\n"
+                )
             page = context.new_page()
             blocked = _setup_safe_mode(context, page) if safe else {}
 
@@ -3554,6 +3673,17 @@ def main(argv=None):
         action="store_true",
         help="安全模式：恢复浏览器进程沙箱+站点隔离、拦挖矿/危险下载/弹窗、落盘白名单+2GB上限，产物隔离到 downloads/safe/（访问可疑站点时用）",
     )
+    parser.add_argument(
+        "--cookies",
+        default="",
+        help="Netscape 格式 cookies.txt 路径（浏览器扩展'Get cookies.txt'导出）。抖音/B站等登录墙站点带登录态下载，chain 里失败还会自动用 cookie 复试一次",
+    )
+    parser.add_argument(
+        "--cookies-from-browser",
+        default="",
+        choices=["chrome", "edge", "firefox"],
+        help="直接读本机浏览器的登录 cookie（免导出，但本机该浏览器得登录过目标站点）。--cookies 同时给时文件优先",
+    )
     parser.add_argument("--json", action="store_true", help="Output JSON")
     args = parser.parse_args(argv)
 
@@ -3607,6 +3737,8 @@ def main(argv=None):
                 model_name=args.model or "",
                 vision_timeout=args.vision_timeout,
                 vision_viewport=vision_vp,
+                cookie_file=args.cookies,
+                cookies_from_browser=args.cookies_from_browser,
             )
             # 自动选到 harvest/files 但颗粒无收：退回通用链再试一次（chain 自带优雅降级）。
             if auto_routed and data.get("count", 0) == 0 and not args.click_download:
@@ -3625,6 +3757,8 @@ def main(argv=None):
                         media_types=args.media_type,
                         safe=args.safe,
                         zip_bundle=args.zip,
+                        cookie_file=args.cookies,
+                        cookies_from_browser=args.cookies_from_browser,
                     )
                     data["method_fallback"] = f"{method}→chain"
                 except Exception:
@@ -3678,6 +3812,8 @@ def main(argv=None):
                     safe=args.safe,
                     zip_bundle=args.zip,
                     max_chapters=args.max_chapters,
+                    cookie_file=args.cookies,
+                    cookies_from_browser=args.cookies_from_browser,
                 )
             except Exception as exc:
                 data = {

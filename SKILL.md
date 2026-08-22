@@ -1,7 +1,7 @@
 ---
 name: deepseek-web-search
 description: DeepSeek 联网搜索技能。遇到实时信息、事实核查、新闻、价格、代码报错、未知名词或用户说“搜一下”时，必须使用本技能搜索并附来源。
-version: 1.12.6
+version: 1.13.0
 updated: 2026-08-22
 author: user
 license: MIT
@@ -57,6 +57,9 @@ tags: [web, search, deepseek, 联网, 搜索]
 | 找不到 ffmpeg（时长无法验证 / yt-dlp 合并 B站分离流中止） | 自动三保险探测：`FFMPEG_PATH`/`FFMPEG_LOCATION` 环境变量 → PATH → 常见位置（winget/scoop/choco/`C:\ffmpeg`/`~/ffmpeg`）；探测结果自动喂给 yt-dlp，无需手动设变量 |
 | 搜索结果 `low_relevance` | 换关键词重搜（加具体词/换同义词），不要直接放弃 |
 | DNS/网络超时 | 中文词换国内引擎 `--engines sogou,so360,baidu` |
+| 抖音/B站报 `需要 cookie`/`Sign in to confirm`/登录墙空壳（video_layout=null、无视频流） | 加 `--cookies-from-browser chrome`（本机 Chrome 登录过）或 `--cookies cookies.txt`；chain 模式带 cookie 全链失败还会自动用 cookie 复试一次 |
+| 抖音 `/note/` 图文帖报 `Unsupported URL` | 不用处理——v1.13.0 起自动转 harvest 收割图集原图（`note_auto_rerouted: true`）；原图仍空说明图集需登录，加 cookie 再试 |
+| 抖音长视频/直播只下到 1.3KB+封面（流没放行） | 站点按视频"看心情"放行，不是工具 bug；如实报告 + 建议 cookie 重试或换 `--method browser` |
 
 ## Token 经济（DeepSeek 上下文管理）
 
@@ -269,9 +272,23 @@ python "{baseDir}/scripts/auto_save_browser.py" --query "用户想找的内容" 
 
 默认保存到 `{baseDir}/downloads/cache`。
 
-默认使用 `--method chain`：自动按顺序尝试 `direct → ytdlp → browser → cache → text`，哪个成功用哪个，失败自动换下一个。如果专门想抓 206 分段缓存（m4s/音频分片），用 `--method cache`，文件会保存到 `downloads/cache/cache_segments/`。
+默认使用 `--method chain`（v1.13.0 扩容）：自动按顺序尝试 `direct → ytdlp → browser → cache → harvest → text` 六条路，哪步失败自动换下一个，哪步成功立即返回（输出 `attempts` 数组记录每步的成败与错误）。带了 cookie 参数且全链失败时，还会追加 `ytdlp+cookies` 复试一搏。如果专门想抓 206 分段缓存（m4s/音频分片），用 `--method cache`，文件会保存到 `downloads/cache/cache_segments/`。
+
+**登录态下载（v1.13.0，`--cookies` / `--cookies-from-browser`）**：抖音/B站等登录墙站点不给匿名访客视频流，带登录 cookie 才放行。两种给法：
+
+```bash
+# 法1：cookies.txt 文件（浏览器装"Get cookies.txt"扩展导出，Netscape 格式）
+python "{baseDir}/scripts/auto_save_browser.py" --url "https://v.douyin.com/xxx" --cookies "D:/cookies.txt" --json
+
+# 法2：直接读本机浏览器的登录态（免导出；本机该浏览器登录过目标站点即可）
+python "{baseDir}/scripts/auto_save_browser.py" --url "https://v.douyin.com/xxx" --cookies-from-browser chrome --json
+```
+
+cookie 全线生效：yt-dlp 路线（`cookiefile`/`cookiesfrombrowser`）、浏览器/cache 路线（context.add_cookies 注入）、harvest 路线、note 图集转路全部吃到；两个参数同时给时文件优先。cookie 过期或域不匹配会如实报错，不静默失败。`own_search.py download` 同名参数透传。
 
 不指定 `--method` 时自动选路：视频站/媒体直链→chain（原路不变）；图片站/音乐站/`--media-type` 单选的照片页音频页→harvest 专用线（DOM 收割+页面上下文下载，快），颗粒无收自动退回 chain 再试；文件（zip/pdf/docx 等直链，或 `--media-type file` / 关键词含"文件/压缩包/文档/pdf"）→files 专用线。显式指定 `--method` 时完全按指定的走。**视频站域名一票否决**：抖音/B站等"视频流+音频流分离"的站点无论 `--media-type` 怎么单选都走视频路（yt-dlp 双流合并），页面里的音频是视频伴音，绝不能拆开只抓半条流；纯图片/纯音频收割时也跳过 m4s/ts 分离流分段防残件。
+
+**抖音图文帖自动转路**（v1.13.0）：`/note/` URL（图文帖）yt-dlp 直接报 Unsupported URL，工具自动识别并先转 harvest 收割图集原图（输出 `note_auto_rerouted: true`，method 记 `chain->harvest(note)`）；harvest 也空（图集被限制）时 chain 继续走兜底链不中断。
 
 **files 文件专用线**（v1.6.0）：文件直链→HTTP 流式直下（8MB 分块不吃内存，文件名优先取 Content-Disposition，网页壳自动拒存）；文件夹/下载页→打开页面收集所有文件链接（a[href] 带文件扩展名，上限 50 个）逐个下载到独立子文件夹 `files_<时间戳>/`，默认保留散文件；加 `--zip` 则全部下完打包成单个 zip 并清掉散文件（合并模式）。`--safe` 下可执行文件（exe/bat 等）下载前直接拦截。
 
