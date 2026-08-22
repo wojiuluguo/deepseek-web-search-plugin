@@ -34,7 +34,7 @@ Default search engines: Bing, Sogou, 360, Baidu (China-first); DuckDuckGo only f
 
 ## Installation
 
-The repo is ~54KB of pure text (no large binaries) — clones in seconds. Heavy dependencies like Chromium are installed by the setup script from official sources.
+The repo is plain-text code plus one mascot image (~2MB); heavy dependencies like Chromium are installed from official sources by the setup script.
 
 ```bash
 git clone https://github.com/wojiuluguo/deepseek-web-search-plugin.git

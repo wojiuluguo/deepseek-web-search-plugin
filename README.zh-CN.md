@@ -34,7 +34,7 @@ OpenClaw Skill：让 DeepSeek 模型能搜索、会搜索、并且"该搜就搜"
 
 ## 安装
 
-仓库仅 ~54KB 纯文本（无大二进制），克隆秒下；Chromium 等大件依赖由安装脚本从官方源安装。
+仓库为纯文本代码 + 一张吉祥物图（约 2MB），无其他大件；Chromium 等真正的大依赖由安装脚本从官方源安装。
 
 ```bash
 git clone https://github.com/wojiuluguo/deepseek-web-search-plugin.git
