@@ -34,7 +34,7 @@ Default search engines: Bing, Sogou, 360, Baidu (China-first); DuckDuckGo only f
 
 ## Installation
 
-The repo is plain-text code plus one mascot image (~2MB); heavy dependencies like Chromium are installed from official sources by the setup script.
+The repo is plain-text code plus one mascot image (~240KB); heavy dependencies like Chromium are installed from official sources by the setup script.
 
 ```bash
 git clone https://github.com/wojiuluguo/deepseek-web-search-plugin.git
@@ -179,7 +179,7 @@ deepseek-web-search-plugin/
     ├── cross_search.py      # Cross-validation / --mega mega search
     ├── search_and_cache.py  # Search + media auto-caching
     ├── own_search.py        # Local standalone search engine
-    ├── auto_save_browser.py # Auto-save browser (download core, sole entry point; slimmed to 1132 lines in v1.22.0)
+    ├── auto_save_browser.py # Auto-save browser (download core, sole entry point; slimmed to 824 lines in v1.22.0)
     ├── auto_save/           # Download-core module package (split across v1.21.1~v1.22.0)
     │   ├── constants.py     #   Constants: extensions/domain lists/junk filters/safe-mode allowlists/UA pool
     │   ├── ffmpeg.py        #   ffmpeg/ffprobe detection & decode verification

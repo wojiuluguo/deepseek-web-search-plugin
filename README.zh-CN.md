@@ -34,7 +34,7 @@ OpenClaw Skill：让 DeepSeek 模型能搜索、会搜索、并且"该搜就搜"
 
 ## 安装
 
-仓库为纯文本代码 + 一张吉祥物图（约 2MB），无其他大件；Chromium 等真正的大依赖由安装脚本从官方源安装。
+仓库为纯文本代码 + 一张吉祥物图（约 240KB），无其他大件；Chromium 等真正的大依赖由安装脚本从官方源安装。
 
 ```bash
 git clone https://github.com/wojiuluguo/deepseek-web-search-plugin.git
@@ -181,7 +181,7 @@ deepseek-web-search-plugin/
     ├── cross_search.py      # 交叉验证 / --mega 超大搜索
     ├── search_and_cache.py  # 搜索+自动缓存媒体
     ├── own_search.py        # 本地独立搜索引擎
-    ├── auto_save_browser.py # 保存型浏览器（下载核心，唯一入口，v1.22.0 瘦身至 1132 行）
+    ├── auto_save_browser.py # 保存型浏览器（下载核心，唯一入口，v1.22.0 瘦身至 824 行）
     ├── auto_save/           # 下载核心模块包（v1.21.1~v1.22.0 分批拆出）
     │   ├── constants.py     #   常量：扩展名/域名表/垃圾过滤/安全模式名单/UA 池
     │   ├── ffmpeg.py        #   ffmpeg/ffprobe 探测与解码验证
