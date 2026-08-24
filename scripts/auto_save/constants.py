@@ -110,10 +110,15 @@ SEARCH_REDIRECT_HOSTS = (
 # 抓包会混入大量页面资源：UI 图、推荐位封面、gif、bin 残片。
 # 默认直接跳过不落盘；--save-junk 时存到 junk/ 子目录。
 
-JUNK_EXTENSIONS = {".gif", ".bin"}
+JUNK_EXTENSIONS = {".gif", ".bin", ".svg"}
 JUNK_URL_HINTS = (
     "/static/", "/assets/", "/asset/", "/sprite", "/icon", "/emoji",
     "/logo", "/avatar", "/widget", "/common/", "/public/",
+    # 压测补充（快手/小红书登录墙页实测漏网）：横幅/登录图/广告位/精灵图/
+    # 图标目录（webframe_icon 类）——harvest 关尺寸判定时仍需拦住这些 UI 资产
+    "banner", "login", "/ad/", "_icon", "icon.", "sprite", "favicon",
+    # 抖音搜索页压测补充：引导图/公告图/激励弹窗图
+    "guide", "notice", "incentive",
 )
 
 # ---- 安全模式（--safe）：访问可疑站点时保护本机 ----

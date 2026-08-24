@@ -25,7 +25,6 @@ import difflib
 import json
 import re
 import sqlite3
-import subprocess
 import sys
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -34,6 +33,10 @@ from typing import Dict, List
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 OWN_DB = BASE_DIR / "index" / "own_search.db"
+
+# ---- 归一（v1.22.0 批 E）：子进程调用/超时策略统一到 searchkit.runner ----
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from searchkit.runner import run_search_cli  # noqa: E402
 
 DEFAULT_ENGINES = ["so360", "sogou", "bing"]
 
@@ -51,80 +54,28 @@ REDIRECT_MARKERS = ("/link?", "url=", "click?", "rd?", "go.php", "jump?")
 
 
 def run_single_engine(query: str, engine: str, max_results: int, browser: bool, ad_filter: str = "medium", safe: bool = False) -> List[Dict]:
-    script = BASE_DIR / "scripts" / ("search_browser.py" if browser else "search.py")
-    cmd = [
-        sys.executable,
-        str(script),
-        "--query",
-        query,
-        "--engines",
-        engine,
-        "--max-results",
-        str(max_results),
-        "--ad-filter",
-        ad_filter,
-        "--json",
-    ]
-    if browser and safe:
-        cmd.append("--safe")
-    try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="ignore",
-            timeout=60,
-        )
-        data = json.loads(proc.stdout)
-    except Exception:
+    env = run_search_cli(query, browser=browser, engines=[engine],
+                         max_results=max_results, ad_filter=ad_filter, safe=safe)
+    if not env["ok"]:
         return []
-    return data.get("results", [])
+    return env["data"].get("results", [])
 
 
 def run_full_copy(query: str, max_results: int, browser: bool, ad_filter: str, category: str, engines_csv: str, safe: bool = False) -> List[Dict]:
     """跑一“份”：全部引擎一次聚合搜索（sub-script 内部会自己汇总去重+广告过滤）。
     返回 [] 表示无结果；超时时返回 [{"_timed_out": True}] 占位（调用方据此区分
-    "搜不到" 和 "被超时杀掉"，不再静默吞）。"""
-    script = BASE_DIR / "scripts" / ("search_browser.py" if browser else "search.py")
-    cmd = [
-        sys.executable,
-        str(script),
-        "--query",
-        query,
-        "--max-results",
-        str(max_results),
-        "--ad-filter",
-        ad_filter,
-        "--json",
-    ]
-    if browser and safe:
-        cmd.append("--safe")
-    if engines_csv:
-        cmd += ["--engines", engines_csv]
-    else:
-        cmd += ["--category", category or "all"]
-    # 超时按引擎规模放大：all 分类轻量版 17 引擎/浏览器版 9 引擎，
-    # 每引擎浏览器最坏 ~36s，固定 120s 必超 → 整份静默变空
-    n_engines = max(1, len([e for e in engines_csv.split(",") if e])) if engines_csv else 9
-    timeout_sec = 60 + n_engines * (40 if browser else 8)
-    try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="ignore",
-            timeout=timeout_sec,
-        )
-        data = json.loads(proc.stdout)
-    except subprocess.TimeoutExpired:
-        print(f"[copy] 超时(>{timeout_sec}s)被杀：{query[:40]} 引擎数≈{n_engines}", file=sys.stderr)
+    "搜不到" 和 "被超时杀掉"，不再静默吞）。超时公式统一在 searchkit.runner.auto_timeout
+    （按真实解析出的引擎数放大：浏览器版每引擎最坏 ~40s，固定上限会把引擎多的整份误杀）。"""
+    env = run_search_cli(query, browser=browser, engines=engines_csv or None,
+                         category=category or "all",
+                         max_results=max_results, ad_filter=ad_filter, safe=safe)
+    if env["timed_out"]:
+        print(f"[copy] 超时(>{env['timeout_sec']}s)被杀：{query[:40]}", file=sys.stderr)
         return [{"_timed_out": True}]
-    except Exception as exc:
-        print(f"[copy] 进程异常: {exc}", file=sys.stderr)
-        return [{"_timed_out": True, "_error": str(exc)}]
-    return data.get("results", [])
+    if not env["ok"]:
+        print(f"[copy] 进程异常: {env['error']}", file=sys.stderr)
+        return [{"_timed_out": True, "_error": env["error"]}]
+    return env["data"].get("results", [])
 
 
 def norm_url(url: str) -> str:

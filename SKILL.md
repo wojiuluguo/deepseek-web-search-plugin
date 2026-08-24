@@ -1,8 +1,8 @@
 ---
 name: deepseek-web-search
 description: DeepSeek 联网搜索技能。遇到实时信息、事实核查、新闻、价格、代码报错、未知名词或用户说“搜一下”时，必须使用本技能搜索并附来源。
-version: 1.21.1
-updated: 2026-08-23
+version: 1.22.0
+updated: 2026-08-24
 author: user（抖音号: 94636651553）
 license: MIT
 tags: [web, search, deepseek, 联网, 搜索]
@@ -438,7 +438,7 @@ python "{baseDir}/scripts/search_browser.py" --query "transformer" --category ac
 
 - **开发助手**：代码由 **智谱 5.3**（GLM）编写与维护
 - **测试 AI**：视觉会话等能力由 **MiniMax M3** 与 **DeepSeek 多模态模型**（deepseek-v4-flash-vision-exp）两个模型交叉实测
-- **代码结构（v1.21.1 模块化）**：`auto_save_browser.py` 下载核心已按安全等级分批拆出 `scripts/auto_save/` 包（constants 常量 / ffmpeg 探测验证 / cookies 登录态 / urlrules URL·媒体·安全判定纯函数）——主文件仍是唯一命令行入口，外部 import 路径零变化，拆分经 AST 逐节点比对 + 差分测试确认零逻辑改动
+- **代码结构（v1.22.0 全量模块化）**：三大门面 + 双包架构——`auto_save_browser.py`（824 行）拆出 `scripts/auto_save/` 包（constants/ffmpeg/cookies/urlrules/browser_base/humanize/realheadless/shots/vision/routing/routes 共 12 模块，四条路线的浏览器启动样板归一为 `browser_base._open_page()`）；`search.py`（124 行）+ `search_browser.py`（148 行）拆出 `scripts/searchkit/` 包（http/normalize/adfilter/dispatch/runner/browser + engines/ 五类 20 引擎 + engines_browser/ 五类 14 浏览器引擎），轻量版与浏览器版共用一套分类表（双表已消灭）；smart/cross/own 三调度器共用 `searchkit/runner.py` 执行件。门面仍是唯一命令行入口，外部 import 路径零变化，全部批次经 AST 逐节点比对 + 运行时验收确认零逻辑改动
 - 详见项目文章 [ARTICLE.md](ARTICLE.md)
 
 ## 失败兜底

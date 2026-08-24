@@ -14,12 +14,15 @@ Smart Search — 自动识别查询类型，自动分配搜索引擎，失败自
 
 import argparse
 import json
-import subprocess
 import sys
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+# ---- 归一（v1.22.0 批 E）：子进程调用/超时策略统一到 searchkit.runner ----
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from searchkit.runner import run_search_cli  # noqa: E402
 
 TYPE_KEYWORDS = {
     "academic": [
@@ -69,52 +72,31 @@ def detect_type(query: str) -> str:
     return best
 
 
-def run_attempt(query: str, category: str, browser: bool, max_results: int, safe: bool = False) -> Dict:
-    script = BASE_DIR / "scripts" / ("search_browser.py" if browser else "search.py")
-    cmd = [
-        sys.executable,
-        str(script),
-        "--query",
-        query,
-        "--category",
-        category,
-        "--max-results",
-        str(max_results),
-        "--json",
-    ]
-    # 安全模式只对浏览器版有意义（search.py 是纯 requests，不碰可疑站点内容）
-    if browser and safe:
-        cmd.append("--safe")
-    # 超时按引擎规模给：浏览器版每引擎最坏 ~36s（goto 25s+选择器 10s），
-    # finance=3 引擎/general=4 引擎/all=9 引擎，固定 90s 会把引擎慢的整轮误杀；
-    # 轻量版纯 requests 快，维持 90s
-    timeout_sec = 240 if browser else 90
-    try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="ignore",
-            timeout=timeout_sec,
-        )
-        data = json.loads(proc.stdout or "{}")
-        data["_returncode"] = proc.returncode
-        data["_stderr"] = proc.stderr[-300:]
+def run_attempt(query: str, category: str, browser: bool, max_results: int, safe: bool = False,
+                ad_filter: str = "medium", precision: Optional[int] = None) -> Dict:
+    env = run_search_cli(query, browser=browser, category=category,
+                         max_results=max_results, safe=safe,
+                         ad_filter=ad_filter, precision=precision)
+    if env["ok"]:
+        data = env["data"]
+        data["_returncode"] = env["returncode"]
+        data["_stderr"] = env["stderr"]
         return data
-    except Exception as exc:
-        return {
-            "query": query,
-            "results": [],
-            "engine_stats": {},
-            "engine_errors": {"subprocess": str(exc)},
-            "_returncode": -1,
-            "_stderr": str(exc),
-        }
+    # 超时/启动失败/解析失败：与旧版同构的错误占位（smart_search 上层据此换分类重搜）
+    return {
+        "query": query,
+        "results": [],
+        "engine_stats": {},
+        "engine_errors": {"subprocess": env["error"]},
+        "_returncode": env["returncode"],
+        "_stderr": env["error"],
+    }
 
 
-def smart_search(query: str, browser: bool = False, max_results: int = 6, safe: bool = False) -> Dict:
-    detected = detect_type(query)
+def smart_search(query: str, browser: bool = False, max_results: int = 6, safe: bool = False,
+                 ad_filter: str = "medium", precision: Optional[int] = None,
+                 category: str = "") -> Dict:
+    detected = category or detect_type(query)
     # 主分类 + 备用分类（不用 all，避免把 DuckDuckGo 等国外引擎带进国内默认兜底）
     categories = [detected, "general"]
     # 去掉重复
@@ -131,7 +113,8 @@ def smart_search(query: str, browser: bool = False, max_results: int = 6, safe: 
     final_category = detected
 
     for cat in unique_categories:
-        data = run_attempt(query, cat, browser, max_results, safe)
+        data = run_attempt(query, cat, browser, max_results, safe,
+                           ad_filter=ad_filter, precision=precision)
         results = data.get("results", [])
         errors = data.get("engine_errors", {}) or {}
         attempts.append(
@@ -191,10 +174,30 @@ def main(argv=None):
     parser.add_argument("--max-results", type=int, default=6, help="每轮最多结果数")
     parser.add_argument("--browser", action="store_true", help="使用浏览器版搜索")
     parser.add_argument("--safe", action="store_true", help="安全模式（浏览器版生效）：沙箱+拦截挖矿/危险文件")
+    parser.add_argument(
+        "--category",
+        choices=["general", "external", "academic", "tech", "finance", "news", "social", "all"],
+        default="",
+        help="跳过自动识别，直接指定搜索分类（默认自动识别查询类型）",
+    )
+    parser.add_argument(
+        "--ad-filter",
+        choices=["none", "low", "medium", "high"],
+        default="medium",
+        help="广告过滤强度: none=不过滤, low=低, medium=中(默认), high=高(可能误杀真实内容)",
+    )
+    parser.add_argument(
+        "--precision",
+        type=int,
+        default=None,
+        help="搜索精准度排序 0-100，越高越优先展示关键词重合度高的结果（默认 50 不透传，走底层脚本默认）",
+    )
     parser.add_argument("--json", action="store_true", help="输出 JSON")
     args = parser.parse_args(argv)
 
-    data = smart_search(args.query, browser=args.browser, max_results=args.max_results, safe=args.safe)
+    data = smart_search(args.query, browser=args.browser, max_results=args.max_results,
+                        safe=args.safe, ad_filter=args.ad_filter,
+                        precision=args.precision, category=args.category)
 
     if args.json:
         print(json.dumps(data, ensure_ascii=False, indent=2))

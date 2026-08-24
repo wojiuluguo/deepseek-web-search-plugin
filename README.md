@@ -4,7 +4,7 @@ English | **[中文](README.zh-CN.md)**
 
 An [OpenClaw](https://github.com/openclaw) skill that gives DeepSeek real web search **and** an auto-save browser that downloads videos/audio/images/files from any webpage it opens — plus a vision mode for multimodal models (see a page, operate a page).
 
-> Current version **v1.21.1** (2026-08-23) · Author: user (Douyin ID: 94636651553) · [Changelog](#changelog)
+> Current version **v1.22.0** (2026-08-24) · Author: user (Douyin ID: 94636651553) · [Changelog](#changelog)
 
 <p align="center"><img src="assets/mascot.png" alt="deepseek-web-search mascot" width="220"></p>
 
@@ -179,12 +179,26 @@ deepseek-web-search-plugin/
     ├── cross_search.py      # Cross-validation / --mega mega search
     ├── search_and_cache.py  # Search + media auto-caching
     ├── own_search.py        # Local standalone search engine
-    ├── auto_save_browser.py # Auto-save browser (download core, sole entry point)
-    ├── auto_save/           # Download-core module package (split in v1.21.1)
-    │   ├── constants.py     #   Constants: extensions/domain lists/safe-mode allowlists/UA pool
+    ├── auto_save_browser.py # Auto-save browser (download core, sole entry point; slimmed to 1132 lines in v1.22.0)
+    ├── auto_save/           # Download-core module package (split across v1.21.1~v1.22.0)
+    │   ├── constants.py     #   Constants: extensions/domain lists/junk filters/safe-mode allowlists/UA pool
     │   ├── ffmpeg.py        #   ffmpeg/ffprobe detection & decode verification
     │   ├── cookies.py       #   Login state: cookie parsing/browser extraction/login rescue
-    │   └── urlrules.py      #   Pure URL/media/security classification functions
+    │   ├── urlrules.py      #   Pure URL/media/security classification functions
+    │   ├── browser_base.py  #   Browser infra: launch args/stealth/safe mode
+    │   ├── humanize.py      #   Human-like input: Bézier paths/micro-offset presses/normal key intervals
+    │   ├── realheadless.py  #   Real-headless: static fingerprint patches + real-Chrome detection
+    │   ├── shots.py         #   Screenshots/screen info
+    │   ├── vision.py        #   Vision-session protocol (stdin/stdout JSON)
+    │   └── routes.py        #   Download routes: browser/cache/harvest/files/text
+    ├── searchkit/           # Search module package (split in v1.22.0; shared by light & browser versions)
+    │   ├── http.py          #   HTTP utils: UA/CA/GET/POST/result builder
+    │   ├── normalize.py     #   URL normalization/dedupe/error-page detection
+    │   ├── adfilter.py      #   4-level ad filtering + precision ranking
+    │   ├── dispatch.py      #   Engine selection (unified category table + availability filter)
+    │   ├── runner.py        #   Subprocess runner (shared by 3 dispatchers)
+    │   ├── browser.py       #   Playwright browser engine layer (14 engines)
+    │   └── engines/         #   20 lightweight engines (web/dev/academic/community/api)
     └── verify_capture.py    # Capture verification
 ```
 
@@ -211,6 +225,19 @@ deepseek-web-search-plugin/
 - **Cost note**: Vision mode (`--method vision`, headless browser session) is billed per screenshot and costs a nontrivial amount — not recommended for general users; all other routes (search/download/text) are completely free
 
 ## Changelog
+
+### v1.22.0 (2026-08-24)
+
+Full modularization refactor (5 batches) + 5-platform stress-test fixes:
+
+- **Batches A/B (download side)**: vision-session protocol split into `auto_save/vision.py` + `shots.py`; download routes split into `auto_save/routes.py` (browser/cache/harvest/files/text); `auto_save_browser.py` slimmed from 4700+ to 1132 lines.
+- **Batches C/D (search side)**: `search.py` (961 lines) split into the `searchkit/` package — http/normalize/adfilter/dispatch + engines/ (20 engines in 5 categories); `search_browser.py` (820 lines) merged into searchkit sharing normalization/dedupe/ad-filter/ranking, and the **duplicate engine tables are gone** (light and browser versions now use one unified CATEGORY_ENGINES table, filtered by mode availability at dispatch time).
+- **Batch E (dispatcher side)**: the duplicated "pick script → build args → subprocess → parse" logic in smart/cross/own converged into a single `searchkit/runner.py` executor with engine-count-adaptive timeouts (the all-category's 17 engines no longer get killed by a timeout sized for 9).
+- **7 real bugs fixed along the way**: arxiv engine's wrong `ns=` parameter name (the academic engine had been broken all along), 3 missing imports in engines/, `--brief` plain-text crash, Chinese precision ranking never working (`\w+` tokenization glued whole Chinese sentences into one token — switched to bigram tokenization).
+- **7 stress-test fixes** (live-tested on Douyin/Xiaohongshu/Kuaishou/Xiaoheihe/Qishui Music + two rounds of user reports): ① search picking a platform's bare homepage as a "video link" — now skipped, plus a `_platform_search_url` fallback for 8 platforms; ② engine-indexed platform search pages carrying only partial keywords — now auto-upgraded to full-keyword search pages; ③ yt-dlp running 3 times in chain mode — a `ytdlp_fallback` switch dedupes it inside the chain; ④ harvest saving SVG sprites/login banners/ad images/guide images as "content" — junk-filter rules extended; ⑤ Xiaohongshu search pages asking for images but getting force-routed to the video pipeline by the "video-site veto" — explicit `--media-type` now wins on search/list pages; ⑥ malformed `duration Nones` log line; ⑦ **yt-dlp filename exceeding Windows' 260-char path limit** (Qishui Music's URL params crammed into title/id, all three routes dying with Errno 2 on the `.part` file) — outtmpl truncation + `trim_file_name` hard cap; verified 598 → 97 chars, file writes fine. Round 2 (/note/ posts): ⑧ note reroute was undiagnosable and music-post harvests got dropped — empty/image-only harvests now logged and recorded in attempts as `harvest(note)`, and when the user wants audio/video that harvest can't provide, the chain proceeds to grab the stream and merges the harvest back; ⑨ mojibake fix rolled back (forcing UTF-8 caused mojibake on GBK terminals — Python's locale default is correct); ⑩ exit code 1 identified as an environment-layer false alarm (Chromium hardcodes a debug.log next to its exe; sandbox/AV interception flags the whole command, while main() provably returns 0).
+- **Full mode audit fixes (5)** (switch inventory + plumbing check across all 6 entry points): ①searchkit/browser layering inversion (search package imported infra via the download facade → now imports `auto_save.browser_base` directly); ②accompanying infra-copy drift (the fallback `_browser_launch_args` copy missed that same day's `--log-file` fix → unified import source); ③smart_search gained `--ad-filter/--precision/--category` end-to-end passthrough, own_search seed gained `--ad-filter`, runner gained precision/site passthrough; ④`--screenshot --profile` captured login-walled pages as empty shells → profile_dir passthrough
+- **Structural cleanup (3 batches, easy → hard, zero logic change)**: batch 1 sunk 9 intent-routing functions into `auto_save/routing.py` (facade 1132 → 824 lines); batch 2 slimmed `searchkit/browser.py` 510 → 257 lines by splitting its 14 browser engines into an `engines_browser/` package (dom/web/dev/academic/alt); batch 3 converged the four duplicated browser-launch templates in routes.py (files/text/harvest/browser) into a single `browser_base._open_page()` — all differences became parameters (profile dir / download trust / self-signed-cert tolerance / random viewport / cookie injection), persistent-context fallback and failure self-cleanup semantics preserved, verified key-by-key equivalent with a fake playwright object (46 checks, all passing).
+- **Compatibility contract**: the three facades (auto_save_browser/search/search_browser) remain the sole CLI entry points; every old name stays available via re-imports, so external import paths are unchanged; each batch verified by AST node-by-node diff + runtime acceptance.
 
 ### v1.21.1 (2026-08-23)
 

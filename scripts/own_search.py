@@ -48,6 +48,11 @@ from typing import Dict, List
 BASE_DIR = Path(__file__).resolve().parent.parent
 INDEX_DIR = BASE_DIR / "index"
 DB_PATH = INDEX_DIR / "own_search.db"
+
+# ---- 归一（v1.22.0 批 E）：搜索子进程调用/超时统一到 searchkit.runner ----
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from searchkit.runner import run_search_cli  # noqa: E402
+
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -340,31 +345,15 @@ def cmd_download(args):
 
 def cmd_seed(args):
     """Use external search only to discover seed URLs, then crawl into our own index."""
-    script = BASE_DIR / "scripts" / ("search_browser.py" if args.browser else "search.py")
-    cmd = [
-        sys.executable,
-        str(script),
-        "--query",
-        args.query,
-        "--max-results",
-        str(args.max_results),
-        "--json",
-    ]
-    try:
-        # 浏览器版搜索最坏 ~240s，给 300s 上限防挂死
-        proc = subprocess.run(cmd, capture_output=True, text=True,
-                              encoding="utf-8", errors="ignore", timeout=300)
-    except subprocess.TimeoutExpired:
-        print(json.dumps({"ok": False, "error": "外部搜索超时(>300s)，种子发现中止"}, ensure_ascii=False))
+    env = run_search_cli(args.query, browser=args.browser, max_results=args.max_results,
+                         ad_filter=getattr(args, "ad_filter", "medium"))
+    if env["timed_out"]:
+        print(json.dumps({"ok": False, "error": f"外部搜索超时(>{env['timeout_sec']}s)，种子发现中止"}, ensure_ascii=False))
         return 1
-    except Exception as exc:
-        print(json.dumps({"ok": False, "error": f"搜索进程异常: {exc}"}, ensure_ascii=False))
+    if not env["ok"]:
+        print(json.dumps({"ok": False, "error": f"搜索进程异常: {env['error']}", "stderr": env["stderr"][-500:]}, ensure_ascii=False))
         return 1
-    try:
-        data = json.loads(proc.stdout)
-    except Exception:
-        print(json.dumps({"ok": False, "error": "外部搜索输出无法解析", "stderr": proc.stderr[-500:]}, ensure_ascii=False))
-        return 1
+    data = env["data"]
 
     conn = get_db()
     added = []
@@ -449,6 +438,8 @@ def main(argv=None):
     p_seed.add_argument("--query", required=True)
     p_seed.add_argument("--max-results", type=int, default=5)
     p_seed.add_argument("--browser", action="store_true", help="用浏览器版搜索发现URL")
+    p_seed.add_argument("--ad-filter", choices=["none", "low", "medium", "high"], default="medium",
+                        help="广告过滤强度（种子发现默认 medium，防垃圾URL进索引）")
     p_seed.add_argument("--force-browser", action="store_true", help="抓取网页时强制用 Playwright 浏览器")
     p_seed.add_argument("--timeout", type=int, default=10)
     p_seed.set_defaults(func=cmd_seed)

@@ -4,7 +4,7 @@
 
 OpenClaw Skill：让 DeepSeek 模型能搜索、会搜索、并且"该搜就搜"，还能自动下载网页里的视频/音频/图片/文件，多模态模型还能"看页面+操作页面"。
 
-> 当前版本 **v1.21.1**（2026-08-23）· 作者：user（抖音号: 94636651553）· [更新记录](#更新记录)
+> 当前版本 **v1.22.0**（2026-08-24）· 作者：user（抖音号: 94636651553）· [更新记录](#更新记录)
 
 <p align="center"><img src="assets/mascot.png" alt="deepseek-web-search 吉祥物" width="220"></p>
 
@@ -181,12 +181,26 @@ deepseek-web-search-plugin/
     ├── cross_search.py      # 交叉验证 / --mega 超大搜索
     ├── search_and_cache.py  # 搜索+自动缓存媒体
     ├── own_search.py        # 本地独立搜索引擎
-    ├── auto_save_browser.py # 保存型浏览器（下载核心，唯一入口）
-    ├── auto_save/           # 下载核心模块包（v1.21.1 拆分）
-    │   ├── constants.py     #   常量：扩展名/域名表/安全模式名单/UA 池
+    ├── auto_save_browser.py # 保存型浏览器（下载核心，唯一入口，v1.22.0 瘦身至 1132 行）
+    ├── auto_save/           # 下载核心模块包（v1.21.1~v1.22.0 分批拆出）
+    │   ├── constants.py     #   常量：扩展名/域名表/垃圾过滤/安全模式名单/UA 池
     │   ├── ffmpeg.py        #   ffmpeg/ffprobe 探测与解码验证
     │   ├── cookies.py       #   登录态：cookies 解析/浏览器提取/登录兜底
-    │   └── urlrules.py      #   URL/媒体/安全判定纯函数
+    │   ├── urlrules.py      #   URL/媒体/安全判定纯函数
+    │   ├── browser_base.py  #   浏览器基建：启动参数/伪装/安全模式
+    │   ├── humanize.py      #   拟人输入：贝塞尔轨迹/微偏移按压/正态键间隔
+    │   ├── realheadless.py  #   无头拟真：静态指纹补丁+真 Chrome 探测
+    │   ├── shots.py         #   截图/屏幕信息
+    │   ├── vision.py        #   视觉会话协议（stdin/stdout JSON）
+    │   └── routes.py        #   下载路线：browser/cache/harvest/files/text
+    ├── searchkit/           # 搜索模块包（v1.22.0 拆出，轻量/浏览器双版共用）
+    │   ├── http.py          #   请求件：UA/CA/GET/POST/结果构造
+    │   ├── normalize.py     #   URL 归一/去重/错误页识别
+    │   ├── adfilter.py      #   四档广告过滤+精准度排序
+    │   ├── dispatch.py      #   引擎选择（统一分类表+可用性过滤）
+    │   ├── runner.py        #   子进程执行件（3 调度器共用）
+    │   ├── browser.py       #   Playwright 浏览器引擎层（14 引擎）
+    │   └── engines/         #   轻量引擎 20 个（web/dev/academic/community/api 五类）
     └── verify_capture.py    # 抓包产物校验
 ```
 
@@ -213,6 +227,19 @@ deepseek-web-search-plugin/
 - **费用提醒**：视觉模式（`--method vision` 无头浏览器会话）按截图付费，消费金额较大，一般用户不推荐使用；搜索/下载/抓正文等其他路线全部免费
 
 ## 更新记录
+
+### v1.22.0（2026-08-24）
+
+全量模块化重构（五批）+ 五平台压力测试修复：
+
+- **批 A/B（下载侧）**：视觉会话协议层拆出 `auto_save/vision.py` + `shots.py`；下载路线拆出 `auto_save/routes.py`（browser/cache/harvest/files/text）；`auto_save_browser.py` 从 4700+ 行瘦身至 1132 行
+- **批 C/D（搜索侧）**：`search.py`（961 行）拆出 `searchkit/` 包——http/normalize/adfilter/dispatch + engines/ 五类 20 引擎；`search_browser.py`（820 行）并入 searchkit 共用归一/去重/广告过滤/排序/**双引擎表消灭**（轻量版与浏览器版统一用一套 CATEGORY_ENGINES 分类表，调度时按模式可用性过滤）
+- **批 E（调度侧）**：smart/cross/own 三调度器重复的"选脚本→拼参数→subprocess→解析"收敛为 `searchkit/runner.py` 统一执行件，超时按引擎数自适应（all 分类 17 引擎不再被按 9 引擎估的超时误杀）
+- **顺手修复 7 个真实 bug**：arxiv 引擎 `ns=` 参数名错（学术引擎一直坏）、engines 缺 import×3、`--brief` 纯文本输出崩溃、中文 precision 排序失效（`\w+` 分词把中文整句黏成一个词，改二元组分词）
+- **压力测试修复 7 项**（抖音/小红书/快手/小黑盒/汽水音乐实测 + 用户反馈两轮）：①搜索捡到平台裸首页当视频链接——跳过+新增 8 平台搜索页兜底 `_platform_search_url`；②引擎索引的平台搜索页只带残缺关键词——自动升级为全关键词搜索页；③chain 模式 yt-dlp 跑 3 次——加 `ytdlp_fallback` 开关链内去重；④harvest 把 svg 精灵/登录横幅/广告图/引导图当内容存盘——补垃圾过滤规则；⑤小红书搜索页要图被"视频站一票否决"导去视频链——搜索页显式 `--media-type` 优先；⑥日志 `时长 Nones` 格式错；⑦**ytdlp 文件名超长 Windows 写入失败**（汽水音乐 URL 长参数塞进 title/id，路径超 260 上限三路全挂）——outtmpl 截断 + `trim_file_name` 硬限，实测 598→97 字符写盘成功。第二轮（/note/ 链路）：⑧note 转路不可诊断+音乐帖收获丢失——harvest 空转/只收图留痕、attempts 记 `harvest(note)`、要音视频而收获没有则落 chain 抓流并合并收获；⑨乱码修复回滚（UTF-8 强设在 GBK 终端反致乱码，保持 Python 默认）；⑩exit 1 定性为环境层误伤（Chromium 写 exe 目录 debug.log 被沙箱/杀软拦，代码层 main 实测 return 0）
+- **全模式审计修复 5 项**（6 入口全部开关盘点 + 管线核查）：①searchkit/browser 分层倒挂（搜索包经下载门面 import 基建→直接用 `auto_save.browser_base`）；②伴随的基建副本漂移（兜底 `_browser_launch_args` 复制品漏了当天的 `--log-file` 修复→import 源归一消灭）；③smart_search 补 `--ad-filter/--precision/--category` 全链透传、own_search seed 补 `--ad-filter`（防垃圾 URL 入索引）、runner 补 precision/site 透传；④`--screenshot --profile` 截图不带登录态（登录墙页截出空壳）→ profile_dir 透传
+- **结构优化三批**（由易到难，零逻辑改动）：批 1 意图路由 9 函数下沉 `auto_save/routing.py`（门面 1132→824 行）；批 2 `searchkit/browser.py` 510→257 行，14 个浏览器引擎拆 `engines_browser/` 包（dom/web/dev/academic/alt 五类）；批 3 routes.py 四份浏览器启动样板（files/text/harvest/browser 各一份近 40 行副本）归一为 `browser_base._open_page()` 单实现，差异全部入参（持久化目录/下载信任/自签容忍/随机视口/登录态注入），持久化回退与失败自清理语义保持，伪造 playwright 对象 46 项逐键等价验证全过
+- **兼容性契约**：三大门面（auto_save_browser/search/search_browser）仍是唯一命令行入口，全部旧名 re-import 保持可用，外部 import 路径零变化；每批经 AST 逐节点比对 + 运行时验收
 
 ### v1.21.1（2026-08-23）
 
