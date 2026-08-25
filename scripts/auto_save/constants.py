@@ -106,6 +106,21 @@ SEARCH_REDIRECT_HOSTS = (
     "quark.com",
 )
 
+# 分享短链域名（v1.22.1）：跳转后才见真实 URL（/note/ 图文帖等），
+# 调度器先跟一次重定向再判类型，否则 note 预判（子串检查）永远不触发。
+SHARE_SHORTLINK_HOSTS = (
+    "v.douyin.com",
+    "xhslink.com",
+    "www.iesdouyin.com",
+)
+
+# 登录墙站点（v1.22.1）：无 cookie 时 direct（拿到 HTML 壳页）/ytdlp（Fresh
+# cookies needed）必败——chain 不再白跑这两步，直上 browser 硬抓。
+LOGIN_WALL_HOSTS = (
+    "douyin.com",
+    "iesdouyin.com",
+)
+
 # ---------- 垃圾资源过滤 ----------
 # 抓包会混入大量页面资源：UI 图、推荐位封面、gif、bin 残片。
 # 默认直接跳过不落盘；--save-junk 时存到 junk/ 子目录。
@@ -119,6 +134,25 @@ JUNK_URL_HINTS = (
     "banner", "login", "/ad/", "_icon", "icon.", "sprite", "favicon",
     # 抖音搜索页压测补充：引导图/公告图/激励弹窗图
     "guide", "notice", "incentive",
+    # 快手滑图帖压测补充（v1.22.1）：评论区头像（uhead 路径）+ 表情贴图
+    # （emotion webp）混进 harvest 产物 25 项垃圾、正文图集全漏——装饰件拦截
+    "uhead", "emotion", "emoticon",
+    # 快手压测补充（v1.22.1）：风控弹滑块验证码时 captcha.zt.kuaishou.com 的
+    # cutPic/bgPic 拼图混进产物（22KB+48KB 两张验证码底图被判 partial）——
+    # captcha 端点绝无用户内容
+    "captcha",
+)
+
+# 站点 UI/推广物料域（v1.22.1 抖音压测排雷）：这些域只放页面皮肤/引导图/
+# 客户端安装物料，绝无用户内容——但体积不小（douyin_pc_client.mp4 实测
+# 11MB 推广视频、pad_guid/mobile_home 引导图 37 张全混进产物）。
+STATIC_ASSET_HOSTS = (
+    "douyinstatic.com",   # 抖音站点 UI：pad_guid/mobile_home 引导图、皮肤、二维码
+    "bytednsdoc.com",     # 字节静态文档：PC 客户端安装视频/下载物料
+    "p-pc-weboff.byteimg.com",  # 抖音 PC web 官方物料：二维码/弹窗背景/扩展壁纸
+    # （实测 49 张混进产物，含 douyin-web-extension-wallpapers 壁纸 13MB）
+    "fe-platform.xhscdn.com",  # 小红书前端平台资产（v1.22.1 压测）：登录墙弹窗
+    # 底图/二维码/平台插画（实测匿名访问 explore 抓到的全是这些装饰件）
 )
 
 # ---- 安全模式（--safe）：访问可疑站点时保护本机 ----
@@ -160,8 +194,11 @@ __all__ = [
     'FILE_EXTS',
     'PROFILE_DIR',
     'SEARCH_REDIRECT_HOSTS',
+    'SHARE_SHORTLINK_HOSTS',
+    'LOGIN_WALL_HOSTS',
     'JUNK_EXTENSIONS',
     'JUNK_URL_HINTS',
+    'STATIC_ASSET_HOSTS',
     'DANGEROUS_EXTS',
     'MINING_DOMAINS',
     'STRATUM_PORTS',

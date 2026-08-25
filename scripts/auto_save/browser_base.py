@@ -64,11 +64,30 @@ def _browser_launch_args(safe: bool) -> List[str]:
     # 杀软拦截时整个命令报 exit 1（JSON 完整、Python 实际 return 0，环境层误伤）。
     # --enable-logging=none 对 headless shell 无效（实测仍写），改用 --log-file
     # 重定向到系统临时目录（各环境都允许写），exe 目录零写入。
+    # v1.22.1 实测补完（B站压测复现概率性沙箱击杀）：
+    #   ① --log-file 只管浏览器主进程，重视频页会拉起 GPU 进程注入 NVIDIA 驱动
+    #      （nvAppTimestamps + exe 目录 debug.log 双写）——宿主沙箱按路径黑名单
+    #      概率性杀整条命令，这就是"成功却 exit 1"的真凶。--disable-gpu 掐掉
+    #      NVIDIA 注入路径，视频软解照常播（B站 206 流实测不受影响）；
+    #   ② WebGL 软渲染指纹（SwiftShader）由 realheadless 的 getParameter 补丁罩住
+    #      （报集成显卡），stealth 不受损；
+    #   ③ CHROME_LOG_FILE 环境变量兜底重定向 GPU/子进程日志（--log-file 的盲区）。
     try:
         _log_file = os.path.join(tempfile.gettempdir(), "dwsp_chromium_debug.log")
-        args = ["--disable-blink-features=AutomationControlled", f"--log-file={_log_file}"]
+        args = ["--disable-blink-features=AutomationControlled", f"--log-file={_log_file}",
+                "--disable-gpu",
+                # 视频硬解（DXVA/NVDEC）会拉起 NVIDIA 驱动写 ProgramData——
+                # 严格沙箱宿主中途杀命令（B站长视频实测复现）。禁硬解走 ffmpeg
+                # 软解：流照抓（101 响应实测）、CPU 占用换环境兼容性
+                "--disable-accelerated-video-decode",
+                # GL 走 SwiftShader 软渲染（v1.22.1 抖音复测追加）：--disable-gpu
+                # 后合成器仍可能经 ANGLE→D3D11→NVIDIA 驱动加载 nvapi64（nvAppTimestamps
+                # 双写，沙箱概率性击杀的唯一残存路径）——钉死软渲染彻底绕开显卡驱动。
+                "--use-angle=swiftshader"]
+        os.environ.setdefault("CHROME_LOG_FILE", _log_file)
     except Exception:
-        args = ["--disable-blink-features=AutomationControlled"]
+        args = ["--disable-blink-features=AutomationControlled", "--disable-gpu",
+                "--disable-accelerated-video-decode", "--use-angle=swiftshader"]
     if not safe:
         args += ["--disable-features=IsolateOrigins,site-per-process", "--no-sandbox"]
     try:
@@ -126,6 +145,80 @@ def _apply_stealth(context, mode: str) -> str:
         return "basic(fallback)"
 
 
+# ---- Chromium 通道择优（v1.22.1 实测排雷） ----
+# chrome-headless-shell（Playwright 默认无头二进制）无视一切日志参数
+# （--log-file / CHROME_LOG_FILE / --disable-logging 实测全部无效，WebRTC
+# 一拉就写），把 debug.log 写进 exe 同目录；重视频页还会拉起 GPU 进程注入
+# NVIDIA 驱动（ProgramData\nvAppTimestamps 双写）。AI 宿主沙箱/杀软按路径
+# 黑名单拦截时整条命令被杀——JSON 已完整、Python 实际 return 0，宿主却报
+# exit 1（v1.22.0 未根治的"环境层误伤"，v1.22.1 在 B站压测中复现定性）。
+# 完整 Chromium 二进制日志走用户目录、尊重重定向，exe 目录零写入 → 根治。
+_LAUNCH_CHANNEL = {"v": None}
+
+
+def _launch_chromium(p, headless: bool, args, **kw):
+    """统一 Chromium launch：通道择优 chrome → chromium → shell 兜底（进程内缓存）。
+    chrome = 本机真 Chrome（realheadless 拟真首选，指纹最真）；
+    chromium = Playwright 完整构建（new headless，不写 exe 目录 debug.log）；
+    shell = chrome-headless-shell（老环境兜底，有 exe 目录日志风险）。"""
+    order = []
+    try:
+        from . import realheadless
+        _pc = realheadless.preferred_channel()
+        if _pc:
+            order.append(_pc)
+    except Exception:
+        pass
+    order.append("chromium")
+    if _LAUNCH_CHANNEL["v"] in order:
+        order = [_LAUNCH_CHANNEL["v"]]
+    last_exc = None
+    for ch in order:
+        try:
+            b = p.chromium.launch(channel=ch, headless=headless, args=args, **kw)
+            _LAUNCH_CHANNEL["v"] = ch
+            return b
+        except Exception as exc:
+            last_exc = exc
+    try:
+        b = p.chromium.launch(headless=headless, args=args, **kw)
+        _LAUNCH_CHANNEL["v"] = "shell"
+        return b
+    except Exception:
+        raise last_exc
+
+
+def _launch_chromium_persistent(p, user_data_dir: str, headless: bool, args, **kw):
+    """launch_persistent_context 的通道择优版（同 _launch_chromium）。"""
+    order = []
+    try:
+        from . import realheadless
+        _pc = realheadless.preferred_channel()
+        if _pc:
+            order.append(_pc)
+    except Exception:
+        pass
+    order.append("chromium")
+    if _LAUNCH_CHANNEL["v"] in order:
+        order = [_LAUNCH_CHANNEL["v"]]
+    last_exc = None
+    for ch in order:
+        try:
+            ctx = p.chromium.launch_persistent_context(
+                channel=ch, user_data_dir=user_data_dir, headless=headless, args=args, **kw)
+            _LAUNCH_CHANNEL["v"] = ch
+            return ctx
+        except Exception as exc:
+            last_exc = exc
+    try:
+        ctx = p.chromium.launch_persistent_context(
+            user_data_dir=user_data_dir, headless=headless, args=args, **kw)
+        _LAUNCH_CHANNEL["v"] = "shell"
+        return ctx
+    except Exception:
+        raise last_exc
+
+
 def _open_page(p, headed: bool, safe: bool, stealth: str = "full",
                profile_dir: Optional[Path] = None, accept_downloads: bool = False,
                ignore_https_errors: bool = False, random_viewport: bool = False,
@@ -152,7 +245,8 @@ def _open_page(p, headed: bool, safe: bool, stealth: str = "full",
         if profile_dir:
             # 持久化用户目录（--profile）：登录态跨会话保留；固定 UA 防会话作废
             try:
-                context = p.chromium.launch_persistent_context(
+                context = _launch_chromium_persistent(
+                    p,
                     user_data_dir=str(profile_dir),
                     headless=not headed,
                     args=_browser_launch_args(safe),
@@ -165,7 +259,7 @@ def _open_page(p, headed: bool, safe: bool, stealth: str = "full",
                                  "[profile] 回退一次性上下文\n")
                 context = None
         if context is None:
-            browser = p.chromium.launch(headless=not headed, args=_browser_launch_args(safe))
+            browser = _launch_chromium(p, headless=not headed, args=_browser_launch_args(safe))
             context = browser.new_context(
                 user_agent=random.choice(USER_AGENTS),
                 viewport=({"width": random.randint(1280, 1920),

@@ -62,6 +62,7 @@ from auto_save.constants import (
     CONTENT_TYPE_EXT, VIDEO_LIKE_HOSTS, IMAGE_LIKE_HOSTS, AUDIO_LIKE_HOSTS, FILE_EXTS,
     PROFILE_DIR, SEARCH_REDIRECT_HOSTS, JUNK_EXTENSIONS, JUNK_URL_HINTS,
     DANGEROUS_EXTS, MINING_DOMAINS, STRATUM_PORTS, SAFE_ALLOWED_EXTS, SAFE_MAX_FILE_BYTES,
+    SHARE_SHORTLINK_HOSTS, LOGIN_WALL_HOSTS,
 )
 from auto_save.ffmpeg import (
     _find_tool, _ffmpeg_path, _ffprobe_path, _decoded_duration, _ffprobe_info, _probe_resolution,
@@ -75,7 +76,9 @@ from auto_save.urlrules import (
     APP_STORE_HOSTS, SHELL_BODY_TEXT_LIMIT, CLICK_DOWNLOAD_FILE_TYPES, DOWNLOAD_BUTTON_TEXTS,
     _decode_redirect_url, _is_media_url, _media_kind, _ext_from_content_type, _host_matches,
     _safe_request_reason, _safe_save_reason, _is_junk_resource, _safe_filename,
-    _url_group_key, _extract_shell_redirect, _is_split_stream_fragment,
+    _url_group_key, _url_identity, _cap_filename, _resolve_share_redirect,
+    _assess_saved_quality,
+    _extract_shell_redirect, _is_split_stream_fragment,
     _filename_from_disposition, _is_app_store_url, _decode_scheme_target,
 )
 # ---- 拆分（v1.22.0 第 3 批，比较安全级）：浏览器基建移入 auto_save.browser_base ----
@@ -199,6 +202,20 @@ def auto_save_url(
     url = _decode_redirect_url(url) or url
     yt_error = None
 
+    # 分享短链预解析（v1.22.1 修 note 转路盲区）：v.douyin.com/xhslink.com 短链不含
+    # /note/，下方预判（子串检查）永远不触发，ytdlp 白撞 Unsupported URL。先跟一次
+    # 重定向拿真实 URL 再判。解析失败按原 URL 走（浏览器路线自己会跟跳，不会更糟）。
+    effective_url = url
+    try:
+        _sl_host = urllib.parse.urlparse(url).netloc.lower()
+        if any(_host_matches(_sl_host, d) for d in SHARE_SHORTLINK_HOSTS):
+            resolved = _resolve_share_redirect(url)
+            if resolved:
+                effective_url = _decode_redirect_url(resolved) or resolved
+                sys.stderr.write(f"[note] 短链解析: {url[:60]} → {effective_url[:100]}\n")
+    except Exception:
+        effective_url = url
+
     # 媒体类型过滤：--media-type video,audio,image 任意组合，空则全部
     allowed_kinds = {t.strip() for t in re.split(r"[,，]", (media_types or "").strip()) if t.strip()}
     if not allowed_kinds:
@@ -210,8 +227,9 @@ def auto_save_url(
     # 否则链路无法诊断（用户误判"转路没触发"）；②音频类 note（音乐分享帖）harvest
     # 收不到流媒体，若用户要 audio/video 不能因收到几张图就提前 return，落 chain 抓流，
     # chain 失败时 harvest 收获兜底返回、成功时合并（文件已落盘，不能丢）。
+    # v1.22.1：用短链解析后的 effective_url 判定（短链本身看不出 note）。
     note_harvest = None
-    if "/note/" in url and method in ("chain", "auto", "ytdlp"):
+    if "/note/" in effective_url and method in ("chain", "auto", "ytdlp"):
         try:
             r = auto_save_url(url, output_dir, wait_seconds, "harvest", headed, max_wait,
                               auto_wait, save_junk, keep_segments, media_types, safe,
@@ -252,9 +270,44 @@ def auto_save_url(
                 "error": None if note_harvest else "harvest 未收到内容(可能需登录)",
             })
         last_result = None
+        # 质量门（v1.22.1 修"假成功截断兜底链"）：垃圾成果不算成功，链继续往下兜。
+        # 判据平台无关：产物媒体类型与用户意图的交集 + 残件不算成果。
+        # 抖音封面图、快手头像、任何站的"抓了个寂寞"都按同一把尺子量。
+        _q_rank = {"full": 3, "partial": 2, "junk": 1, "empty": 0}
+        best_result = None  # 全链无正果时返回质量最高的那环（聊胜于无 + 如实标注）
+        # 文件直链意图（v1.22.1 排雷修复B）：URL 以文件扩展名结尾时，拿到文件本体
+        # 就是正片——zip/pdf 不在 video/audio/image 里，旧质量门会判 junk 导致
+        # 全链白跑 6 环（含起浏览器）。文件意图下 file/direct 条目直接记 full。
+        _explicit_file = urllib.parse.urlparse(url).path.lower().endswith(FILE_EXTS)
+
+        def _q(result):
+            # 文件直链意图：拿到文件本体就是正片（kind 不限——direct/files/yt-dlp/browser
+            # 路线都能交付文件；排除 text 挑战页残文和 cache-segment 残件）
+            # v1.22.1 排雷：必须直接赋值——_browser_route 返回时已自带 quality
+            # （常是 junk：file 不在媒体 kind 里），setdefault 升不了级，
+            # 文件已到手链却继续空跑、最终按 junk 上报。
+            if _explicit_file and any(
+                    i.get("kind") not in ("text", "cache-segment", None)
+                    for i in result.get("saved", [])):
+                result["quality"] = "full"
+                return result["quality"]
+            result.setdefault("quality", _assess_saved_quality(result.get("saved", []), allowed_kinds))
+            return result["quality"]
+
         # 兜底链扩容：direct → ytdlp → browser → cache → harvest(媒体页兜底) → text
         # 有 cookie 时追加 ytdlp+cookie 复试（第一遍未带 cookie 的 ytdlp 失败多半是登录墙）
         chain_methods = ["direct", "ytdlp", "browser", "cache", "harvest", "text"]
+        # 登录墙直通（v1.22.1）：已知登录墙站（抖音等）且未带任何登录态时，
+        # direct（只会拿到 HTML 壳页）/ytdlp（Fresh cookies needed）必败——
+        # 不再白跑这两步，直上 browser 硬抓。带 cookie 时 ytdlp 仍有戏，照常走全链。
+        try:
+            _lw_host = urllib.parse.urlparse(url).netloc.lower()
+            if (any(_host_matches(_lw_host, d) for d in LOGIN_WALL_HOSTS)
+                    and not (cookie_file or cookies_from_browser)):
+                chain_methods = ["browser", "cache", "harvest", "text"]
+                sys.stderr.write("[chain] 登录墙站点且未带 cookie：跳过 direct/ytdlp 直上 browser\n")
+        except Exception:
+            pass
         for m in chain_methods:
             try:
                 if m == "text":
@@ -289,9 +342,17 @@ def auto_save_url(
                     "method": m,
                     "count": result.get("count", 0),
                     "error": result.get("yt_dlp_error") or result.get("error"),
+                    "quality": _q(result),
                 }
             )
             if result.get("saved"):
+                # junk 不截断链（v1.22.1）：只有残件/封面的"成功"是假成功——
+                # 记为当前最佳候选后继续兜底，给后面的环留机会。
+                if _q(result) == "junk":
+                    if best_result is None or _q_rank[_q(result)] > _q_rank.get(best_result.get("quality", ""), 0):
+                        best_result = result
+                    last_result = result
+                    continue
                 # note 预判已落盘的收获（图/元数据）合并进 chain 成功结果，不能丢
                 if note_harvest:
                     result["saved"] = note_harvest["saved"] + result["saved"]
@@ -323,8 +384,12 @@ def auto_save_url(
             note_harvest["method"] = "chain->harvest(note)"
             note_harvest["note_auto_rerouted"] = True
             return note_harvest
-        last_result["attempts"] = attempts
-        return last_result
+        # 全链无正果：返回质量最高的一环（junk 成果文件已落盘不丢，但如实标注），
+        # 而不是恰好最后一环的结果——最后一环常是 text 正文，用户要的视频残件反被丢掉。
+        fallback = best_result or last_result
+        fallback["attempts"] = attempts
+        fallback.setdefault("quality", _assess_saved_quality(fallback.get("saved", []), allowed_kinds))
+        return fallback
 
     # files：文件专用路线（压缩包/文档/表格/文本等，直链直下、页面批量下、可打包zip）
     if method == "files":
@@ -431,6 +496,12 @@ def _format_plain(data: Dict) -> str:
     if cleanup and cleanup.get("removed_segments"):
         lines.append(f"已清理分段: {cleanup['removed_segments']} 个（--keep-segments 可保留）")
     saved = data.get("saved", [])
+    q = data.get("quality")
+    if q:
+        q_desc = {"full": "完整成果（含验证过/完整的视频音频）",
+                  "partial": "部分成果（有匹配的内容，未过解码验证）",
+                  "junk": "低质量（与目标类型零交集：残件/封面等，全链未取得正片）"}.get(q, q)
+        lines.append(f"质量: {q}（{q_desc}）")
     lines.append(f"已保存 {len(saved)} 个文件")
     for i, item in enumerate(saved, 1):
         dur = item.get("verified_duration_sec")
@@ -813,11 +884,44 @@ def main(argv=None):
         if _is_vision_model(args.model):
             data["api_hint"] = _vision_api_hint(args.shot_detail)
 
+    # 质量门补齐（v1.22.1 压测排雷）：files/direct/text/harvest 等专用线不自带
+    # quality 字段（只有 chain 线全程评估）——退出码判"非 junk"虽已正确，但
+    # JSON 消费端拿不到统一质量信号（实测 files 线 60MB 完整下载报 quality: null）。
+    # 与 chain 线 _q 同尺：文件直链意图拿到非残件产物即 full；其余按通用评估
+    # （wants 按方法补 file/text 意图，防成功下载被误判 junk）。
+    if not data.get("quality") and args.method != "vision":
+        if data.get("saved"):
+            _src = data.get("source_url") or args.url or ""
+            _explicit_file = urllib.parse.urlparse(_src).path.lower().endswith(FILE_EXTS)
+            if _explicit_file and any(i.get("kind") not in ("text", "cache-segment", None)
+                                      for i in data["saved"]):
+                data["quality"] = "full"
+            else:
+                _kinds = {t.strip() for t in re.split(r"[,，]", (args.media_type or "").strip()) if t.strip()}
+                if not _kinds:
+                    _kinds = {"video", "audio", "image"}
+                if args.method == "files":
+                    _kinds.add("file")
+                elif args.method == "text":
+                    _kinds.add("text")
+                data["quality"] = _assess_saved_quality(data["saved"], _kinds)
+        else:
+            data["quality"] = "empty"
+
     if args.json:
-        print(json.dumps(data, ensure_ascii=False, indent=2))
+        # default=str 兜底（v1.22.1 排雷）：产物 dict 里混进任何非 JSON 类型
+        # （实测 cleanup.removed_paths 曾是 set）不该让整场下载在输出层崩掉。
+        print(json.dumps(data, ensure_ascii=False, indent=2, default=str))
     else:
         print(_format_plain(data))
-    return 0
+    # 退出码语义（v1.22.1 修"失败无信号"）：有正果 = 0，无正果 = 1。
+    # 此前恒 return 0——下载失败/全链空手也报成功，宿主无法据此降级重试。
+    # 判据与质量门同尺：saved 非空且 quality != junk（junk = 残件/封面等零交集
+    # 产物，文件虽落盘但不算正果，如实报失败）；vision 是 stdin/stdout 会话
+    # 协议，自有状态上报，不按下载退出码量。
+    if args.method == "vision":
+        return 0
+    return 0 if (data.get("saved") and data.get("quality") != "junk") else 1
 
 
 if __name__ == "__main__":

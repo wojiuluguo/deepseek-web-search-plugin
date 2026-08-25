@@ -10,8 +10,9 @@ from typing import Optional
 
 from .constants import (
     SEARCH_REDIRECT_HOSTS, VIDEO_EXTS, AUDIO_EXTS, IMAGE_EXTS, MEDIA_EXTENSIONS,
-    CONTENT_TYPE_EXT, JUNK_EXTENSIONS, JUNK_URL_HINTS,
+    CONTENT_TYPE_EXT, JUNK_EXTENSIONS, JUNK_URL_HINTS, STATIC_ASSET_HOSTS,
     MINING_DOMAINS, STRATUM_PORTS, DANGEROUS_EXTS, SAFE_ALLOWED_EXTS, SAFE_MAX_FILE_BYTES,
+    FILE_EXTS,
 )
 
 # APP 商店域名：抓到这些链接说明是"引流装APP"陷阱——按钮抓到的"下载链接"
@@ -107,6 +108,11 @@ def _media_kind(url: str, content_type: str) -> str:
         return "audio"
     if ext in IMAGE_EXTS:
         return "image"
+    # 平台伪扩展（v1.22.1 修快手/抖音图集漏收）：图集 CDN 的 URL 结尾不是
+    # 标准 .jpg/.webp，而是 …~tplv-photomode-zl.image / .awebp——不识别就
+    # 整条判不出媒体类型，正文图集全漏（只能收着头像表情当垃圾成果）。
+    if ext in (".image", ".awebp"):
+        return "image"
     return ""
 
 
@@ -155,6 +161,10 @@ def _is_junk_resource(url: str, content_type: str, size: int, size_strict: bool 
     ext = Path(path).suffix
     if ext in JUNK_EXTENSIONS:
         return True
+    # 站点 UI/推广物料域（v1.22.1 抖音压测）：pc_client 安装视频、引导图等
+    # 大体积推广物料混进产物——域名级一票否决，size_strict 与否都拦。
+    if _is_static_asset_host(url):
+        return True
     if any(h in url.lower() for h in JUNK_URL_HINTS):
         return True
     if not size_strict:
@@ -185,16 +195,157 @@ def _safe_filename(url: str, content_type: str, index: int) -> str:
     return f"{int(time.time())}_{index:03d}_{stem}{ext}"
 
 
-def _url_group_key(url: str) -> str:
-    """分段分组键：scheme://host/目录路径。同一视频的分段共享目录前缀，
-    推荐位视频来自不同目录，靠这个把正片和垃圾分开。"""
+def _assess_saved_quality(saved: list, wants: set) -> str:
+    """成果质量分级（v1.22.1 修"假成功截断兜底链"，平台无关）：
+    full    = 解码验证过的合并正片，或完整视频/音频文件（整文件响应，非分段拼装）
+    partial = 有用户要的类型（图集的图、音频等），但无验证级 AV
+    junk    = 产物与用户意图零交集——典型：要视频只拿到分段残件+封面图/装饰图
+    empty   = 无产物
+    判据只有两条：①残件(cache-segment)合并失败时不算成果（合并成功会变身
+    merged-segment 并带 verified_duration_sec）；②产物媒体类型与 wants 的交集。
+    不含任何域名/平台特判——抖音的封面垃圾、快手的头像垃圾、任何站的"抓了个
+    寂寞"都按同一把尺子量。"""
+    if not saved:
+        return "empty"
+    got: set = set()
+    has_verified = has_complete_av = False
+    for i in saved:
+        if i.get("kind") == "cache-segment":
+            continue  # 拼装残件：合并成功才升格为成果，失败就只是原料
+        if i.get("verified_duration_sec"):
+            has_verified = True
+        # v1.22.1 排雷（B站实测）：url or path 的短路写法在 yt-dlp 条目上翻车——
+        # 它的 url 是页面链接（bilibili.com/video/BV… 无扩展名），path 才是 .mp4；
+        # 旧写法 url 非空就永远不看 path → 判不出 video → 21.5MB 成品被判 junk
+        # → chain 不认账 → browser 路把全部资源重抓一遍（188MB 重复拉流）。
+        # 两边都试：URL 判不出再看落盘路径。
+        k = (_media_kind(i.get("url", ""), i.get("content_type", ""))
+             or _media_kind(i.get("path", ""), i.get("content_type", "")))
+        if k:
+            got.add(k)
+        else:
+            # v1.22.1 排雷：_media_kind 只认 video/audio/image——text 路线的 .txt、
+            # files 路线的 zip/pdf 全返回 ""，text/file 意图永远进不了 got →
+            # 成功下载也被判 junk（要文本拿到正文、要文件拿到文件全是"零交集"）。
+            ik = i.get("kind", "")
+            if ik == "text":
+                got.add("text")
+            elif ik in ("file", "download") or str(i.get("path", "")).lower().endswith(FILE_EXTS):
+                got.add("file")
+        if k in ("video", "audio"):
+            has_complete_av = True
+    if has_verified or has_complete_av:
+        return "full"
+    if not wants or (got & wants):
+        return "partial"
+    return "junk"
+
+
+# CDN 路由前缀（v1.22.1 排雷）：B站 mcdn（P2P CDN）给同一条流的 URL 加
+# /v1/resource 前缀——`mcdn.bilivideo.cn/v1/resource/upgcxcode/…/x.m4s` 与
+# `bilivideo.com/upgcxcode/…/x.m4s` 是同一文件，但路径不同 → 按路径去重/分组
+# 判成两条资源，同一条流被完整下载 2-3 份（B站实测 130MB 原料，应 ~57MB）。
+_CDN_ROUTE_PREFIXES = ("/v1/resource/",)
+
+
+def _stream_path_norm(url: str) -> str:
+    """流资源路径规范化（平台无关）：小写 + 剥 CDN 路由前缀。
+    去重/分组一律用规范化路径——同一文件的镜像变体（含路由前缀差异）归一。"""
     try:
-        parsed = urllib.parse.urlparse(url)
-        path = parsed.path
-        directory = path.rsplit("/", 1)[0] if "/" in path else ""
-        return f"{parsed.netloc.lower()}{directory}"
+        path = urllib.parse.urlparse(url).path.lower()
+        for _pref in _CDN_ROUTE_PREFIXES:
+            if path.startswith(_pref):
+                return path[len(_pref) - 1:]  # 保留前导 /
+        return path
+    except Exception:
+        return (url or "").lower()
+
+
+def _is_static_asset_host(url: str) -> bool:
+    """站点 UI/推广物料域判定（v1.22.1 抖音压测）：douyinstatic.com 的
+    pad_guid/mobile_home 引导图、bytednsdoc.com 的 douyin_pc_client.mp4
+    （11MB PC 客户端安装推广视频）全不是用户内容——域名级一票否决。"""
+    try:
+        host = urllib.parse.urlparse(url).netloc.lower()
+        return any(_host_matches(host, h) for h in STATIC_ASSET_HOSTS)
+    except Exception:
+        return False
+
+
+def _stream_basename(url: str) -> str:
+    """流资源 basename（v1.22.1 抖音压测）：抖音同一视频的多镜像 URL 路径
+    各不相同（tos hash 不同），路径级去重失效——同名 media.mp4 连下 3 份
+    （实测 2.6MB×2 收割 + 5.9MB 整取）。视频/音频流文件名含唯一 ID（B站
+    m4s）或页面单视频语境下同名即同资源（抖音 media.mp4），按 basename
+    去重。图片不适用（同名不同目录的图真实存在）；无媒体扩展名的 API
+    路径（/aweme/v1/play 等 basename 无区分度）不参与。"""
+    try:
+        base = os.path.basename(urllib.parse.urlparse(url).path.lower())
+        ext = Path(base).suffix
+        if ext not in VIDEO_EXTS and ext not in AUDIO_EXTS:
+            return ""
+        return base
+    except Exception:
+        return ""
+
+
+def _url_group_key(url: str) -> str:
+    """分段分组键：规范化目录路径（不含 host——同目录不同 host = CDN 镜像 = 同
+    一资源；同一视频的分段共享目录前缀，推荐位视频来自不同目录，靠目录分开）。"""
+    try:
+        path = _stream_path_norm(url)
+        return path.rsplit("/", 1)[0] if "/" in path else path
     except Exception:
         return url
+
+
+def _url_identity(url: str) -> str:
+    """同资源判定键：scheme 无关 + 去 query（v1.22.1 修重复拉流）。
+    `//host/x.mp4?a=1`（DOM 协议相对地址）与 `https://host/x.mp4?sig=B`（script JSON
+    完整地址）是同一文件——旧去重比完整字符串漏判，同一 media.mp4 被拉两份。"""
+    try:
+        s = (url or "").strip()
+        if s.startswith("//"):
+            s = "https:" + s
+        p = urllib.parse.urlsplit(s)
+        return f"{p.netloc.lower()}{p.path}"
+    except Exception:
+        return url or ""
+
+
+def _cap_filename(name: str, max_stem: int = 80) -> str:
+    """站点给的文件名硬限长（v1.22.1 修超长写盘失败）：stem 截到 max_stem，
+    保住扩展名。Windows 260 字符路径上限下，深层目录 + 站点名（URL 参数拼进
+    title）会把三路写入全部打死。"""
+    if not name:
+        return name
+    stem, dot, ext = name.rpartition(".")
+    if dot and 0 < len(ext) <= 6 and "/" not in ext:
+        return f"{stem[:max_stem]}.{ext}"
+    return name[:max_stem + 7]
+
+
+def _resolve_share_redirect(url: str, timeout: float = 8.0) -> Optional[str]:
+    """分享短链解析真实 URL（v1.22.1 修 note 转路盲区）：v.douyin.com/xhslink.com
+    这类短链不含 /note/，调度器的 note 预判（子串检查）永远不触发，ytdlp 白撞
+    "Unsupported URL"。HEAD 不跟跳读 Location，失败退 GET（只拿响应头不读体）。
+    拿不到返回 None，调用方按原 URL 走（浏览器路线自己会跟跳，不会更糟）。"""
+    import urllib.request
+
+    from .constants import USER_AGENTS
+    for method in ("HEAD", "GET"):
+        try:
+            req = urllib.request.Request(
+                url, method=method,
+                headers={"User-Agent": USER_AGENTS[0]})
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                final = resp.geturl()
+                if final and final != url:
+                    return final
+                return None  # 没跳转：不是短链或已解析，别再折腾
+        except Exception:
+            continue
+    return None
 
 
 def _extract_shell_redirect(html_text: str) -> Optional[str]:
@@ -298,6 +449,10 @@ __all__ = [
     '_is_junk_resource',
     '_safe_filename',
     '_url_group_key',
+    '_url_identity',
+    '_assess_saved_quality',
+    '_cap_filename',
+    '_resolve_share_redirect',
     '_extract_shell_redirect',
     '_is_split_stream_fragment',
     '_filename_from_disposition',

@@ -34,6 +34,34 @@ def run(cmd):
     subprocess.check_call(cmd)
 
 
+def find_pip():
+    """找一个可用的 pip（v1.22.1 修裸崩）：
+    当前解释器可能是裁剪过的 venv（如 OpenClaw/hermes 宿主，无 pip 模块），
+    直接 `sys.executable -m pip` 会抛裸 CalledProcessError 崩溃且无任何提示。
+    探测顺序：当前解释器 pip → ensurepip 补装 → 明确报错（装到别的解释器没用，
+    本脚本检查的是当前解释器的 import，装偏了白装）。"""
+    try:
+        r = subprocess.run([sys.executable, "-m", "pip", "--version"],
+                           capture_output=True, timeout=30)
+        if r.returncode == 0:
+            return [sys.executable, "-m", "pip"]
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    # 当前解释器没有 pip：ensurepip 补装一次再试
+    print("[提示] 当前解释器缺少 pip 模块，尝试 ensurepip 引导安装...")
+    try:
+        r = subprocess.run([sys.executable, "-m", "ensurepip", "--upgrade"],
+                           capture_output=True, timeout=120)
+        if r.returncode == 0:
+            r2 = subprocess.run([sys.executable, "-m", "pip", "--version"],
+                                capture_output=True, timeout=30)
+            if r2.returncode == 0:
+                return [sys.executable, "-m", "pip"]
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return None
+
+
 def main():
     print("=" * 60)
     print("DeepSeek Web Search Skill - 依赖自动安装")
@@ -48,8 +76,21 @@ def main():
             print(f"[缺少] {pip_name}")
 
     if missing:
+        pip_cmd = find_pip()
+        if pip_cmd is None:
+            print("\n[错误] 当前 Python 解释器没有可用的 pip，且 ensurepip 引导失败。")
+            print(f"        当前解释器: {sys.executable}")
+            print("        两种解法：")
+            print("        1. 用带 pip 的解释器重跑本脚本（如: py -3 install_dependencies.py）")
+            print("        2. 或给当前解释器装 pip: python -m ensurepip --upgrade")
+            return 1
         print("\n[安装] 正在安装缺失的 Python 包...")
-        run([sys.executable, "-m", "pip", "install", "--upgrade"] + missing)
+        try:
+            run(pip_cmd + ["install", "--upgrade"] + missing)
+        except subprocess.CalledProcessError as exc:
+            print(f"\n[错误] 包安装失败: {exc}")
+            print("       可手动执行: " + " ".join(pip_cmd + ["install"] + missing))
+            return 1
     else:
         print("\n[跳过] Python 依赖都已安装。")
 

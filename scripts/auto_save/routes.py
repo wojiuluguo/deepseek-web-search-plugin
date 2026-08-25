@@ -19,17 +19,22 @@ import zipfile
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from .browser_base import _open_page, _save_bytes, _wait_for_render
+from .browser_base import (
+    _open_page, _save_bytes, _wait_for_render,
+    _apply_stealth, _browser_launch_args, _launch_chromium,
+)
 from .constants import AUDIO_EXTS, FILE_EXTS, SAFE_MAX_FILE_BYTES, USER_AGENTS, VIDEO_EXTS
 from .ffmpeg import (_decoded_duration, _ffmpeg_path, _ffprobe_info, _ffprobe_path,
                      _probe_resolution)
 from .humanize import human_move, human_scroll
 from .urlrules import (CLICK_DOWNLOAD_FILE_TYPES, DOWNLOAD_BUTTON_TEXTS,
-                       MEDIA_EXTENSIONS, SHELL_BODY_TEXT_LIMIT, _decode_redirect_url,
-                       _decode_scheme_target, _ext_from_content_type, _extract_shell_redirect,
+                       MEDIA_EXTENSIONS, SHELL_BODY_TEXT_LIMIT, _assess_saved_quality,
+                       _cap_filename, _decode_redirect_url, _decode_scheme_target,
+                       _ext_from_content_type, _extract_shell_redirect,
                        _filename_from_disposition, _host_matches, _is_app_store_url,
-                       _is_junk_resource, _is_media_url, _is_split_stream_fragment, _media_kind,
-                       _safe_filename, _safe_save_reason, _url_group_key)
+                       _is_junk_resource, _is_media_url, _is_split_stream_fragment,
+                       _is_static_asset_host, _media_kind, _safe_filename, _safe_save_reason,
+                       _stream_basename, _stream_path_norm, _url_group_key, _url_identity)
 
 __all__ = [
     "HARVEST_JS", "FILE_LINKS_JS", "CHAPTER_LINKS_JS",
@@ -151,6 +156,10 @@ def _download_with_ytdlp(url: str, output_dir: Path, safe: bool = False,
         "noplaylist": True,
         "quiet": True,
         "no_warnings": True,
+        # 进度条污染 stdout（v1.22.1 网易云压测排雷）：quiet 只拦 to_screen，
+        # 下载进度走 _multiline.print_at_line 直接写 stdout——--json 模式的
+        # 标准输出被 [download] xx% 糊一脸，下游 JSON 解析全崩。noprogress 掐掉。
+        "noprogress": True,
         "restrictfilenames": True,
         "format": "bestvideo+bestaudio/best",
         "merge_output_format": "mp4",
@@ -189,6 +198,19 @@ def _download_with_ytdlp(url: str, output_dir: Path, safe: bool = False,
                     if os.path.exists(fp):
                         paths.append(fp)
                 for fp in paths:
+                    # v1.22.1 快手压测排雷：generic extractor 把 API 错误响应存成
+                    # .unknown_video（实测 63B 的 {"result":2,...} JSON）——非媒体
+                    # 扩展名 + <4KB 必是壳页/错误响应，删除不入产物（防假下载）。
+                    try:
+                        _sz = os.path.getsize(fp)
+                        _ext = Path(fp).suffix.lower()
+                        if _ext not in MEDIA_EXTENSIONS and _sz < 4096:
+                            os.remove(fp)
+                            sys.stderr.write(f"[ytdlp] 丢弃伪产物: {Path(fp).name} "
+                                             f"({_sz}B 非媒体响应)\n")
+                            continue
+                    except OSError:
+                        pass
                     saved.append(
                         {
                             "url": url,
@@ -238,7 +260,20 @@ def _download_with_ytdlp(url: str, output_dir: Path, safe: bool = False,
 
 
 def _download_direct(url: str, output_dir: Path, safe: bool = False):
-    """Try to download a direct media file (mp4/jpg/mp3...) with a browser-like UA."""
+    """Try to download a direct media file (mp4/jpg/mp3...) with a browser-like UA.
+    v1.22.1：文件直链（URL 以文件扩展名结尾，zip/pdf/docx/exe…22 种）先走
+    _file_direct_download 流式分块下载（8MB 块不吃内存，大文件友好）。
+    门槛必须卡扩展名：无门槛会让普通页面/API 的 JSON 响应也被当文件存
+    （实测排雷：任何非 HTML 响应都会落盘成垃圾"文件"）。无扩展名 URL
+    多为页面/API，留给后面的路线处理。"""
+    if urllib.parse.urlparse(url).path.lower().endswith(FILE_EXTS):
+        item = _file_direct_download(url, output_dir, safe=safe)
+        if not item:
+            # 文件阶梯第 2 招：真 Chromium 指纹（治 JA3 拦 urllib 的站，w3.org 实测）
+            item = _file_browser_fetch(url, output_dir, safe=safe)
+        if item:
+            return [item], None
+        return [], "file direct download failed (link dead / TLS-blocked / is a webpage)"
     parsed = urllib.parse.urlparse(url)
     ext = Path(parsed.path).suffix.lower()
     try:
@@ -319,32 +354,210 @@ def _auto_play_videos(page):
 
 
 
+_MOBILE_UA = ("Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) "
+              "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1")
+
+
+def _refetch_personas(page_url: str) -> List[Dict]:
+    """取流人设阶梯（v1.22.1，平台无关）：每招对应一类站点的验法。
+    反馈驱动（_refetch_full_media 内）按响应特征跳招，不盲试。"""
+    referer = ""
+    if page_url:
+        parsed = urllib.parse.urlparse(page_url)
+        referer = f"{parsed.scheme}://{parsed.netloc}/"
+    return [
+        # 1 页签原生（cookie+referer 齐全，最像播放器自己）——由调用方 _page_fetch 承担
+        {"id": "tab", "via": "page"},
+        # 2 桌面 UA 直取（热链站只验 referer/UA）
+        {"id": "desktop", "via": "http", "ua": None, "referer": referer or None},
+        # 3 移动 UA（抖音/快手系 CDN 面向移动端，移动 UA 通过率高）
+        {"id": "mobile", "via": "http", "ua": _MOBILE_UA, "referer": referer or None},
+        # 4 裸取（不带 referer——部分站反着来，带了 referer 判定为爬虫）
+        {"id": "bare", "via": "http", "ua": None, "referer": None},
+    ]
+
+
+def _refetch_full_media(page, page_url, stream_info, output_dir, safe, seen):
+    """先要后抓（v1.22.1 范式升级，平台无关）——六招阶梯 + 反馈驱动：
+
+    招式序列（成功即停，总尝试硬上限 6 防请求风暴触发风控）：
+      1 tab      页签 fetch（cookie/referer 齐全，最像播放器自己）
+      2 desktop  http 桌面 UA + referer
+      3 mobile   http 移动 UA + referer（抖音/快手系 CDN 面向移动端）
+      4 bare     http 裸取（部分站带 referer 反判爬虫）
+      5 refresh  刷新页面换新鲜签名 URL 再走 1-2（签名过期是多数拦截主因，
+                  换 UA 无用，刷新才是解药；限一次）
+      6 range    Range: bytes=0- 变体（416/206 语义差异站）
+
+    反馈驱动：403/401 → 跳 mobile（换身份）；截断 200 → 跳 refresh（换票）；
+    全空 → 顺序下一招。缺斤短两（< Content-Range 总长）一律不要。
+    候选判据/成功标准同前：total > max_seg + 4KB 才值得整取；拿到全量才存。"""
+    import base64
+    results: List[Dict] = []
+    # 站点物料域一票否决（v1.22.1 抖音压测二次排雷）：uuu_265.mp4 这类
+    # douyinstatic.com 推广物料经 body-不可读账本混进整取候选（实测 199KB
+    # 下载入产物）——账本两个记入口（on_response 兜底/cache 分段）都不拦，
+    # 在唯一消费口（这里）统一拦，一处管全部。
+    ranked = sorted(
+        ((u, i) for u, i in stream_info.items()
+         if (i.get("total") or 0) > (i.get("max_seg") or 0) + 4096
+         and not _is_static_asset_host(u)),
+        key=lambda x: x[1].get("total") or 0, reverse=True,
+    )[:5]
+    # 镜像去重（v1.22.1 排雷）：B站 playinfo 的 baseUrl + backupUrl 是同一段流的
+    # 不同 CDN 主机（路径相同）——media_streams 按完整 URL 记账会拆成多条候选，
+    # 同一文件被 tab/desktop 各整取一份（实测 4.9MB×2）。按路径去重，镜像只取首个。
+    # v1.22.1 二次排雷（B站实测 30216 音频×2）：mcdn PCDN 镜像带 /v1/resource
+    # 路由前缀，裸 path 比较判成两条资源——用规范化路径（_stream_path_norm）。
+    # v1.22.1 三次排雷（抖音实测 media.mp4×2）：镜像 URL 路径各不相同（tos hash
+    # 不同）——路径尺失效，带媒体扩展名的流文件同名即同资源，basename 双尺去重。
+    _seen_paths, _seen_names, _deduped = set(), set(), []
+    for u, i in ranked:
+        _p = _stream_path_norm(u)
+        _b = _stream_basename(u)
+        if _p in _seen_paths or (_b and _b in _seen_names):
+            continue
+        _seen_paths.add(_p)
+        if _b:
+            _seen_names.add(_b)
+        _deduped.append((u, i))
+    ranked = _deduped
+    if not ranked:
+        return results
+
+    def _try_get(u: str, p: Dict) -> Optional[Dict]:
+        if p["via"] == "page":
+            return _page_fetch(page, u)
+        return _http_fetch_media(u, page_url=page_url, persona=p)
+
+    attempts = 0
+    refreshed = False
+    for u, info in ranked:
+        personas = _refetch_personas(page_url)
+        pi = 0
+        round_after_refresh = False
+        while pi < len(personas) and attempts < 6:
+            p = personas[pi]
+            attempts += 1
+            seen.add(u)
+            item = _try_get(u, p)
+            if item and item.get("b64"):
+                try:
+                    data = base64.b64decode(item["b64"])
+                except Exception:
+                    data = b""
+                total = info.get("total") or 0
+                if data and total and len(data) >= total:
+                    ct = item.get("ct", "") or ""
+                    if safe:
+                        reason = _safe_save_reason(_safe_filename(u, ct, 0), len(data))
+                        if reason:
+                            sys.stderr.write(f"[safe-block] 落盘拒绝 {reason}: {u[:120]}\n")
+                            break
+                    path = _save_bytes(data, output_dir, u, ct, 90000 + len(results))
+                    results.append({
+                        "url": u, "path": str(path), "content_type": ct,
+                        "size": len(data), "kind": "full-refetch", "via": p["id"],
+                    })
+                    sys.stderr.write(f"[refetch:{p['id']}] 整文件重取成功: {Path(path).name} "
+                                     f"({len(data)}B)——免分段拼装\n")
+                    break  # 这条流要到了，下一条流
+                if data:
+                    # 200 但截断 → 签名票过期，刷新换弹药（限一次）
+                    if not refreshed:
+                        refreshed = True
+                        try:
+                            page.reload(timeout=15000)
+                            time.sleep(1.0)
+                            sys.stderr.write("[refetch] 截断响应，刷新页面换新鲜签名 URL\n")
+                            pi = 0  # 重走 tab 招（新页面上下文）
+                            continue
+                        except Exception:
+                            pass
+                    sys.stderr.write(
+                        f"[refetch:{p['id']}] 整取 {len(data)}B < 流总长 {total}B，弃\n")
+            else:
+                # 全空响应（CORS/网络断）：招式耗尽前刷一次页换新上下文再试一轮
+                if not refreshed and pi == len(personas) - 1 and not round_after_refresh:
+                    refreshed = True
+                    round_after_refresh = True
+                    try:
+                        page.reload(timeout=15000)
+                        time.sleep(1.0)
+                        sys.stderr.write("[refetch] 全招无响应，刷新页面换上下文再试一轮\n")
+                        pi = 0
+                        continue
+                    except Exception:
+                        pass
+            # 失败反馈：403 → 直跳 mobile（换身份）；否则顺序下一招
+            pi = pi + 1 if p["id"] != "desktop" or not (item and item.get("status") in (403, 401)) else 2
+            time.sleep(0.3)  # 招间隔：防短时高频触发风控
+        if attempts >= 6:
+            sys.stderr.write("[refetch] 达尝试上限 6，回退分段抓取\n")
+            break
+    return results
+
+
 def _merge_segments(saved: List[Dict], output_dir: Path, keep_segments: bool = False, safe: bool = False) -> Tuple[List[Dict], Dict]:
     """验证式合并：
-    1. 只取 cache-segment，按 (扩展名, URL目录) 分组——正片/音频/推荐位天然分家；
+    1. 只取 cache-segment，按 (媒体家族, URL目录) 分组——正片/音频/推荐位天然分家；
+       v1.22.1：.mp4/.m4s 归同一家族——fMP4 的 init.mp4(moov头) 与 seg-*.m4s 本是一条流，
+       旧按扩展名分组把它们拆开，m4s 组拼出的文件必然无 moov 头解不开；
     2. ffprobe 可用时剔除异分辨率（推荐位竖屏小段）与 <0.5s 残段；
-    3. 每组按到达顺序拼接，ffmpeg 解码验证真实时长，<3s 或解码失败即弃；
-    4. 多组通过时取真实时长最长的一组为正片；
-    5. 无 ffmpeg 时只合并体量最大组并明确标注 unverified。
+    3. 组内排序：有 206 偏移按文件内偏移排 + 同偏移去重（并行请求到达序≠文件序，
+       旧按到达序拼=必然损坏）；无偏移时 init 段置首；
+    4. ffmpeg 解码验证真实时长，<3s 或解码失败即弃；
+    5. 多组通过时取真实时长最长的一组为正片；
+    6. 无 ffmpeg 时只合并体量最大组并明确标注 unverified；
+    7. 同资源完整文件已在产物中（pagefetch/network 拿过）→ 跳过分段合并，成果互认。
     返回 (merged_list, cleanup_info)。"""
     seg_items = [i for i in saved if i.get("kind") == "cache-segment"]
     cleanup = {"removed_segments": 0, "kept_segments": 0}
     if not seg_items:
         return [], cleanup
 
-    # ---- 分组 ----
+    # ---- 分组（v1.22.1：媒体家族维度，修 init/m4s 拆组） ----
+    def _seg_family(ext: str) -> str:
+        return ".mp4" if ext in (".mp4", ".m4s", ".m4v") else ext
+
     groups: Dict[Tuple[str, str], List[Dict]] = {}
     for item in seg_items:
         ext = Path(item.get("path", "")).suffix.lower()
-        key = (ext, _url_group_key(item.get("url", "")))
+        key = (_seg_family(ext), _url_group_key(item.get("url", "")))
         groups.setdefault(key, []).append(item)
+
+    # 成果互认（v1.22.1 修重复拉流对偶面）：pagefetch/network 已有同资源完整文件
+    # → 不再拼分段（拼了也是第二份）。两套抓取机制从此互认，不再各干各的。
+    complete_ids = {
+        _url_identity(i.get("url", ""))
+        for i in saved if i.get("kind") != "cache-segment" and i.get("url")
+    }
 
     # 弃掉总量的<5% 的碎组（范围请求残片/推荐位）
     total_bytes = sum(i.get("size", 0) for i in seg_items)
     candidates = []
     for key, items in groups.items():
         group_bytes = sum(i.get("size", 0) for i in items)
-        if len(items) >= 2 and (total_bytes == 0 or group_bytes / total_bytes >= 0.05):
+        # 整文件已在产物（先要成功/pagefetch 已拿过）：该组分段全是冗余原料，
+        # 清盘 + 剔条目（removed_paths 供调用方过滤 phantom），不再只是跳过。
+        if any(_url_identity(i.get("url", "")) in complete_ids for i in items):
+            for i in items:
+                try:
+                    p = Path(i.get("path", ""))
+                    if p.exists():
+                        p.unlink()
+                        cleanup["removed_segments"] += 1
+                        # v1.22.1 排雷：必须是 list——set 会进 result["cleanup"]，
+                        # json.dumps 直接 TypeError（B站实测：下载全成功、输出层崩溃）
+                        cleanup.setdefault("removed_paths", []).append(str(p))
+                except Exception:
+                    pass
+            sys.stderr.write(f"[merge-segments] 清理 {len(items)} 个冗余分段: "
+                             f"{key[1][:80]}（同资源完整文件已在产物中）\n")
+            continue
+        # v1.22.1：单段组也放行（快手式"整条流一个响应给全"），循环内单段转正
+        # 逻辑负责甄别——完整可解码转正，残料丢弃；多段组照旧走拼接。
+        if len(items) >= 1 and (total_bytes == 0 or group_bytes / total_bytes >= 0.05):
             candidates.append((group_bytes, key, items))
     if not candidates:
         return [], cleanup
@@ -357,7 +570,41 @@ def _merge_segments(saved: List[Dict], output_dir: Path, keep_segments: bool = F
     # ---- 逐组合并 + 验证（最多试前3大组） ----
     results = []
     for group_bytes, (ext, gkey), items in candidates[:3]:
-        items.sort(key=lambda x: x.get("seq", 0))
+        # ---- 组内排序（v1.22.1 修合并失败根源①：到达序 → 文件序） ----
+        ranged = [i for i in items if i.get("range_start") is not None]
+        if len(ranged) == len(items):
+            # 全带 206 偏移：按文件内偏移排（并行请求到达序 ≠ 文件序）
+            items.sort(key=lambda x: x["range_start"])
+        else:
+            # 混合（init 200 小段 + 206 数据段，或纯 200）：init 置首，其余偏移/序号排。
+            # 防损坏护栏：组里混进"无偏移大文件"（完整 200 响应）+ 偏移段同组时，
+            # 字节序无法判定——放弃拼接（宁可不拼，不产废品）。
+            big_plain = [i for i in items
+                         if i.get("range_start") is None and i.get("size", 0) >= 262144]
+            if big_plain and ranged:
+                sys.stderr.write(f"[merge-segments] 跳过 {gkey[:80]}: 完整文件与分段混组，字节序不可判\n")
+                continue
+
+            def _seg_order(i):
+                name = urllib.parse.urlparse(i.get("url", "")).path.rsplit("/", 1)[-1].lower()
+                if ("init" in name) or (i.get("range_start") is None and i.get("size", 0) < 65536):
+                    return (0, 0, 0)  # fMP4 init 段（moov 头）永远在最前
+                if i.get("range_start") is not None:
+                    return (1, i["range_start"], 0)
+                return (2, 0, i.get("seq", 0))
+
+            items.sort(key=_seg_order)
+        # 同偏移重叠段去重（两条排序路径共用）：偏移相同 = 同一段重传，只留一个
+        if ranged:
+            seen_offs, deduped = set(), []
+            for i in items:
+                off = i.get("range_start")
+                if off is not None:
+                    if off in seen_offs:
+                        continue
+                    seen_offs.add(off)
+                deduped.append(i)
+            items = deduped
         # ffprobe 剔除异分辨率/超短残段（每段只探测一次，缓存 info 复用）
         if _ffprobe_path():
             seg_infos = {i["path"]: _ffprobe_info(i.get("path", "")) for i in items}
@@ -386,6 +633,55 @@ def _merge_segments(saved: List[Dict], output_dir: Path, keep_segments: bool = F
                 filtered.append(i)
             if len(filtered) >= 2:
                 items = filtered
+        if len(items) == 1:
+            # v1.22.1 快手压测排雷：整条流单响应完整到达（快手 8.6MB/29s 正片
+            # 一个 200/206 就给全，无 init/分段结构）——单段组不是残料。
+            # ffprobe 能独立解码且时长 ≥3s = 完整成品，直接转正为最终产物；
+            # 解不开/过短才是真残料（照旧弃）。
+            i = items[0]
+            if _ffprobe_path():
+                info = _ffprobe_info(i.get("path", ""))
+                try:
+                    dur = float((info or {}).get("format", {}).get("duration") or 0)
+                except (TypeError, ValueError):
+                    dur = 0
+                if dur >= 3:
+                    # 完整性门（v1.22.1 快手压测二次排雷）：206 部分块也能解出
+                    # 5.6s 时长（渐进 mp4 边缘可解码）——首块 1.2MB 曾被误判成品，
+                    # 60s 正片全丢。只有 200 全量响应、或 206 覆盖到文件尾
+                    # （range_start+size ≥ range_total）才算完整，可转正。
+                    _rt = i.get("range_total")
+                    _complete = (i.get("status") == 200) or (
+                        _rt and (i.get("range_start") or 0) + i.get("size", 0) >= _rt)
+                    if not _complete:
+                        sys.stderr.write(
+                            f"[merge-segments] 单段不完整（{i.get('size', 0)}B/"
+                            f"总 {_rt or '?'}B），不转正，交由整取重试\n")
+                        continue
+                    try:
+                        src = Path(i.get("path", ""))
+                        if not src.exists():
+                            continue
+                        dst = output_dir / f"fullvideo_{int(time.time())}_{len(results)}{ext}"
+                        src.replace(dst)
+                        results.append({
+                            "url": i.get("url", ""),
+                            "path": str(dst),
+                            "content_type": i.get("content_type", ""),
+                            "size": dst.stat().st_size,
+                            "kind": "merged-segment",
+                            "ext": ext,
+                            "segments": 1,
+                            "group_bytes": group_bytes,
+                            "verified_duration_sec": round(dur, 2),
+                            "unverified": False,
+                            "note": "单响应完整流，直接转正",
+                        })
+                        sys.stderr.write(f"[merge-segments] 单段完整流转正: "
+                                         f"{dst.name} ({dur:.1f}s)\n")
+                    except Exception as exc:
+                        sys.stderr.write(f"[merge-segments] 单段转正失败: {exc}\n")
+            continue
         if len(items) < 2:
             continue
 
@@ -459,7 +755,12 @@ def _merge_segments(saved: List[Dict], output_dir: Path, keep_segments: bool = F
 
 
 def _has_video_or_audio(saved: List[Dict]) -> bool:
+    """产物里有没有可用的视频/音频本体。
+    v1.22.1：cache-segment 残件不算——.m4s 扩展名在 VIDEO_EXTS 里，合并失败后
+    剩下的一堆残件曾骗过这道门（误判"有视频"→ 跳过 yt-dlp 降级 → 假成功）。"""
     for item in saved:
+        if item.get("kind") == "cache-segment":
+            continue  # 拼装残件：合并成功升格 merged-segment 才算数
         path = item.get("path", "").lower()
         ct = item.get("content_type", "").lower()
         if ct.startswith(("video/", "audio/")):
@@ -549,15 +850,18 @@ def _capture_blob_media(page, output_dir: Path, safe: bool = False) -> List[Dict
 
 
 
-def _page_fetch(page, url: str) -> Optional[Dict]:
-    """在页面上下文里 fetch 资源（带 cookie/referer），返回 {b64,size,ct} 或 None。"""
+def _page_fetch(page, url: str, persona: Optional[Dict] = None) -> Optional[Dict]:
+    """在页面上下文里 fetch 资源（带 cookie/referer），返回 {b64,size,ct} 或 None。
+    v1.22.1 人设参数：persona 可覆盖 UA（fetch 无法改 UA，仅绕过部分服务端
+    UA 校验的场景无效——此路招式在 _refetch 阶梯里由 http 路承担），
+    headers 可加 Referer/Range 等自定义头。"""
     try:
         return page.evaluate(
             """
-            async (u) => {
+            async (u, hdrs) => {
                 const t = (p, ms) => Promise.race([p, new Promise(r => setTimeout(() => r(null), ms))]);
                 try {
-                    const r = await t(fetch(u, {credentials: 'include'}), 10000);
+                    const r = await t(fetch(u, {credentials: 'include', headers: hdrs || {}}), 10000);
                     if (!r || !r.ok) return null;
                     const buf = await t(r.arrayBuffer(), 10000);
                     if (!buf) return null;
@@ -566,38 +870,48 @@ def _page_fetch(page, url: str) -> Optional[Dict]:
                     let binary = '';
                     for (let i = 0; i < bytes.length; i += 0x8000)
                         binary += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
-                    return {b64: btoa(binary), size: bytes.length, ct: r.headers.get('content-type') || ''};
+                    return {b64: btoa(binary), size: bytes.length, ct: r.headers.get('content-type') || '',
+                            status: r.status};
                 } catch (e) { return null; }
             }
             """,
-            url,
+            [url, (persona or {}).get("headers")],
         )
     except Exception:
         return None
 
 
 
-def _http_fetch_media(url: str, page_url: str = "", timeout: int = 20) -> Optional[Dict]:
+def _http_fetch_media(url: str, page_url: str = "", timeout: int = 20,
+                      persona: Optional[Dict] = None) -> Optional[Dict]:
     """脚本侧 HTTP 直下媒体（收割降级路线）：页面上下文 fetch 被跨域 CORS 拦时用。
-    带浏览器 UA + 来源页 Referer（防热链基本够用），返回 {b64,size,ct} 或 None。"""
+    带浏览器 UA + 来源页 Referer（防热链基本够用），返回 {b64,size,ct} 或 None。
+    v1.22.1：persona 人设支持 {ua, referer, range}——阶梯取流时换身份再试。"""
     import base64
 
     try:
+        p = persona or {}
         headers = {
-            "User-Agent": random.choice(USER_AGENTS),
-            "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+            "User-Agent": p.get("ua") or random.choice(USER_AGENTS),
+            "Accept": p.get("accept") or "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
             "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
         }
-        if page_url:
+        if p.get("range"):
+            headers["Range"] = p["range"]
+        if p.get("referer"):
+            headers["Referer"] = p["referer"]
+        elif page_url:
             parsed = urllib.parse.urlparse(page_url)
             headers["Referer"] = f"{parsed.scheme}://{parsed.netloc}/"
         req = urllib.request.Request(url, headers=headers)
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = resp.read()
             ct = resp.headers.get("Content-Type", "")
+            status = getattr(resp, "status", None) or resp.getcode()
         if not data or len(data) > 80 * 1024 * 1024:
             return None
-        return {"b64": base64.b64encode(data).decode("ascii"), "size": len(data), "ct": ct}
+        return {"b64": base64.b64encode(data).decode("ascii"), "size": len(data),
+                "ct": ct, "status": status}
     except Exception:
         return None
 
@@ -627,6 +941,25 @@ def _goto_pierce_shell(page, url: str, max_hops: int = 3) -> str:
             body_len = 0
         if body_len >= SHELL_BODY_TEXT_LIMIT:
             break  # 正文丰富：真页面，不是壳
+        # v1.22.1 网易云压测排雷①：iframe 渲染页（网易云 g_iframe 等）主文档正文
+        # 天生极短——正文在子 frame 里，不是壳页。带 iframe 的短正文页不穿透。
+        try:
+            n_iframes = page.evaluate(
+                "() => document.querySelectorAll('iframe').length") or 0
+        except Exception:
+            n_iframes = 0
+        if n_iframes > 0:
+            break
+        # v1.22.1 网易云压测排雷②：跳向站点首页/裸域 = 降级不是穿透（网易云歌页
+        # canonical 指首页，整场收割被带去首页空转）。壳页只会跳向更具体的页面。
+        def _specific(u: str) -> bool:
+            try:
+                p = urllib.parse.urlparse(u)
+                return bool(p.path.strip("/") or p.query or p.fragment.strip("#/"))
+            except Exception:
+                return True
+        if not _specific(target) and _specific(current):
+            break
         sys.stderr.write(f"[pierce] 跟进落地页壳: {target[:120]}\n")
         try:
             page.goto(target, wait_until="domcontentloaded", timeout=30000)
@@ -719,41 +1052,84 @@ def _harvest_lazy_all(page, url: str, output_dir: Path, allowed_kinds: set, seen
 def _harvest_dom_media(
     page, url: str, output_dir: Path, allowed_kinds: set, seen: set, save_junk: bool,
     limit: int = 40, safe: bool = False, fail_counts: Optional[dict] = None,
+    dedup_hashes: Optional[set] = None,
 ) -> List[Dict]:
     """收集页面里所有媒体 URL（DOM/元数据/内嵌JSON），用页面上下文逐个下载。
     与网络嗅探互补：嗅探抓"浏览器请求过的"，收割抓"页面上存在但可能没请求/请求被拦的"。
     fail_counts：URL→失败次数。瞬时失败（超时/被拦）不进 seen，跨轮还有机会重试
-    （旧逻辑一次失败永久拉黑，迭代滚动收割后续轮次全跳过——漏图）；最多重试 2 次。"""
+    （旧逻辑一次失败永久拉黑，迭代滚动收割后续轮次全跳过——漏图）；最多重试 2 次。
+    dedup_hashes：已落盘内容 md5 集（v1.22.1 抖音压测排雷——URL 无扩展名的
+    API 流（/play 之类）basename 无区分度，同视频 media.mp4 收割连下 2 份
+    逐字节重复 816KB×2；内容 hash 是最后一道通用去重，与 URL 形态无关）。"""
     import base64
+    import hashlib
 
     if fail_counts is None:
         fail_counts = {}
 
     candidates: List[Dict] = []
+    # v1.22.1 网易云压测排雷③：iframe 渲染站（网易云 g_iframe 等）正文/媒体全在
+    # 子 frame 里——只收主 frame = 全漏。全 frame 收割（主 frame 天然在首位）。
     try:
-        dom_items = page.evaluate(HARVEST_JS) or []
+        frames = list(page.frames) or [page]
     except Exception:
-        dom_items = []
-    for it in dom_items:
-        candidates.append((it.get("url", ""), it.get("tag", "dom"), it.get("kind", "")))
+        frames = [page]
+    for frame in frames:
+        try:
+            dom_items = frame.evaluate(HARVEST_JS) or []
+        except Exception:
+            dom_items = []
+        for it in dom_items:
+            candidates.append((it.get("url", ""), it.get("tag", "dom"), it.get("kind", "")))
 
-    # 内嵌 JSON：抖音/B站把媒体直链藏在 script 变量里
-    try:
-        script_text = page.evaluate(
-            "() => [...document.querySelectorAll('script')].map(s => s.textContent || '').join('\\n')"
-        )
-    except Exception:
-        script_text = ""
+    # 内嵌 JSON：抖音/B站把媒体直链藏在 script 变量里（同样全 frame 收——
+    # 网易云的歌单/歌曲数据在 iframe 文档的 script 里）
+    script_texts = []
+    for frame in frames:
+        try:
+            script_texts.append(frame.evaluate(
+                "() => [...document.querySelectorAll('script')].map(s => s.textContent || '').join('\\n')"
+            ) or "")
+        except Exception:
+            pass
+    script_text = "\n".join(script_texts)
     if script_text:
+        # v1.22.1 修快手滑图帖漏正文图集：内嵌 JSON（__INITIAL_STATE__ 等）里的 URL
+        # 全是 JSON 转义形态 https:\/\/p2.xxx.com\/a.jpg（还有 \u002F/\u0026 变体），
+        # 旧正则要求字面 //——一个都匹配不上，图集 URL 整体漏收。先还原转义再匹配。
+        # 另补平台伪扩展 .image/.awebp（…~tplv-photomode-zl.image）。
+        plain = (script_text
+                 .replace("\\u002F", "/").replace("\\u002f", "/")
+                 .replace("\\u0026", "&").replace("\\u0026", "&")
+                 .replace("\\/", "/"))
         urls = re.findall(
-            r"https?://[^\s\"'\\<>]+?\.(?:mp4|m4s|mp3|m4a|aac|webm|mov|jpg|jpeg|png|webp)(?:\?[^\s\"'\\<>]*)?",
-            script_text,
+            r"https?://[^\s\"'\\<>]+?\.(?:mp4|m4s|mp3|m4a|aac|webm|mov|jpg|jpeg|png|webp|image|awebp)(?:\?[^\s\"'\\<>]*)?",
+            plain,
         )
         for u in urls[:120]:
             candidates.append((u, "script-json", _media_kind(u, "")))
 
     saved = []
     fetched = 0
+    # 同资源判定键（v1.22.1 修重复拉流）：DOM 里 `//host/media.mp4?a=1`（协议相对）
+    # 与 script JSON 里 `https://host/media.mp4?sig=B`（绝对）是同一文件——旧去重比
+    # 完整字符串/去 query 字符串都漏判，同一视频被完整拉两份（1.7MB×2）。
+    seen_ids = {_url_identity(s) for s in seen}
+    # 镜像路径去重（v1.22.1 排雷）：B站 playinfo JSON 把 baseUrl + backupUrl 全列出来
+    # （同路径不同 CDN 主机），旧逻辑逐条下载——同一段 m4s 被完整拉 3 份（20.8MB×3，
+    # B站实测）。跨 CDN 镜像同路径 = 同一段流，只下首个。seen 里的网络层已抓 URL
+    # 也按路径推导，收割与网络嗅探/整取三路互认。
+    # v1.22.1 二次排雷：mcdn PCDN 镜像带 /v1/resource 路由前缀——必须用
+    # _stream_path_norm 规范化，否则同一流按两种 path 各下一份（B站实测）。
+    seen_paths = {
+        _stream_path_norm(s)
+        for s in seen if isinstance(s, str) and s.startswith(("http://", "https://", "//"))
+    }
+    # 流类 basename 去重（v1.22.1 抖音压测排雷）：抖音同一视频的多镜像 URL
+    # 路径各不相同（tos hash 不同），路径去重失效——media.mp4 被连下 3 份
+    # （整取 5.9MB + 收割 2.6MB×2）。带媒体扩展名的流文件同名即同资源。
+    seen_stream_names = {_stream_basename(s) for s in seen if isinstance(s, str)}
+    seen_stream_names.discard("")
     for u, tag, kind_hint in candidates:
         if fetched >= limit:
             break
@@ -766,10 +1142,24 @@ def _harvest_dom_media(
         kind = _media_kind(u, "") or kind_hint
         if kind not in allowed_kinds:
             continue
-        if u in seen or u.split("?")[0] in seen:
+        # 站点物料域一票否决（v1.22.1 抖音压测）：douyinstatic.com 引导图、
+        # bytednsdoc.com 的 douyin_pc_client.mp4（11MB PC 客户端安装推广视频）
+        # 全不是用户内容——域名级预拦，视频图片都拦，省流量防污染。
+        if _is_static_asset_host(u):
             continue
-        # 网络嗅探已存过的同路径资源也别重收（seen 里现在存完整 URL，带 query）
-        if any(s.split("?")[0] == u.split("?")[0] for s in seen):
+        if _url_identity(u) in seen_ids:
+            continue
+        _upath = _stream_path_norm(u)
+        if _upath and _upath in seen_paths:
+            continue  # CDN 镜像：同路径不同主机 = 同一段，已由网络层/整取拿过
+        # 流类 basename 去重：镜像 URL 路径各异（抖音 tos hash），同名流文件 =
+        # 同资源（整取/前一条已拿），拦下不再拉第二份
+        _bname = _stream_basename(u)
+        if _bname and _bname in seen_stream_names:
+            continue
+        # 下载前预拦装饰件（v1.22.1）：uhead 头像/emotion 表情在 DOM 和 JSON 里
+        # 都会出现——旧逻辑先整份下载再靠落盘前过滤扔掉，白耗流量还混进产物。
+        if kind == "image" and _is_junk_resource(u, "", 0, size_strict=False):
             continue
         if fail_counts.get(u, 0) >= 2:
             continue  # 连败 2 次：真死链/真被拦，不再每轮空耗
@@ -782,6 +1172,11 @@ def _harvest_dom_media(
             fail_counts[u] = fail_counts.get(u, 0) + 1
             continue  # 瞬时失败不进 seen：下一轮滚动收割还有机会重试
         seen.add(u)
+        seen_ids.add(_url_identity(u))
+        if _upath:
+            seen_paths.add(_upath)
+        if _bname:
+            seen_stream_names.add(_bname)
         data = base64.b64decode(item["b64"])
         if len(data) < 2048:
             continue
@@ -798,6 +1193,16 @@ def _harvest_dom_media(
             continue
         if kind == "image" and _is_junk_resource(u, ct, len(data), size_strict=False):
             continue
+        # 内容 hash 去重（v1.22.1 抖音压测排雷，最后一道通用防线）：URL 尺
+        # （identity/path/basename）全失效时——抖音无扩展名 API 流 URL 路径
+        # 各异——逐字节相同的第二份照样落盘（实测 media.mp4 816KB×2）。
+        _h = hashlib.md5(data).hexdigest()
+        if dedup_hashes is not None:
+            if _h in dedup_hashes:
+                sys.stderr.write(f"[harvest] 内容重复丢弃: {Path(u).name[:60]} "
+                                 f"({len(data)}B，与已落盘产物逐字节相同)\n")
+                continue
+            dedup_hashes.add(_h)
         # 安全模式：落盘白名单 + 大小上限（URL 里的扩展名必须过白名单才落盘）
         if safe and _safe_save_reason(_safe_filename(u, ct, fetched), len(data)):
             continue
@@ -851,10 +1256,28 @@ def _save_page_text(page, url: str, output_dir: Path) -> Dict:
 
 
 def _file_direct_download(url: str, dest_dir: Path, safe: bool = False, referer: str = "") -> Optional[Dict]:
-    """HTTP 流式直链下载（8MB 分块，不吃内存）。返回 saved 条目或 None（失败/是网页）。"""
+    """HTTP 流式直链下载（8MB 分块，不吃内存）。返回 saved 条目或 None（失败/是网页）。
+    v1.22.1 实测排雷：Chrome UA 被 UA 黑名单 CDN 403 时（w3.org 实测——
+    Chrome UA 3/3 拦、Firefox UA 3/3 过、yt-dlp 也被拦），换 Firefox UA 重试一次。
+    这比开浏览器便宜两个数量级，先换装再上真 Chromium（_file_browser_fetch）。"""
+    # UA 阶梯：Chrome（默认）→ Firefox（UA 黑名单站）
+    _ua_chrome = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                  "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36")
+    _ua_firefox = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) "
+                   "Gecko/20100101 Firefox/125.0")
+    for _ua in (_ua_chrome, _ua_firefox):
+        item = _file_direct_download_ua(url, dest_dir, safe, referer, _ua)
+        if item is not None:
+            return item
+        # HTML 壳页返回 None 也别换 UA 重试（换装治不了壳页），但无法区分失败类型——
+        # 换 UA 重试只在"异常失败"时才值得，壳页场景二次请求代价小，可接受
+    return None
+
+
+def _file_direct_download_ua(url: str, dest_dir: Path, safe: bool, referer: str, ua: str) -> Optional[Dict]:
+    """_file_direct_download 的单 UA 实现（同一段流式下载逻辑跑不同 UA）。"""
     req = urllib.request.Request(url, headers={
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                      "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+        "User-Agent": ua,
         **({"Referer": referer} if referer else {}),
     })
     try:
@@ -898,6 +1321,101 @@ def _file_direct_download(url: str, dest_dir: Path, safe: bool = False, referer:
         sys.stderr.write(f"[file-dl] error: {exc} url={url[:120]}\n")
         return None
 
+
+
+def _file_browser_fetch(url: str, output_dir: Path, safe: bool = False,
+                        referer: str = "") -> Optional[Dict]:
+    """文件阶梯第 2 招（v1.22.1 实测排雷）：真 Chromium 指纹取文件。
+    治 TLS 指纹拦截站（JA3）：urllib 同样的请求头被 403、curl/浏览器 200
+    （w3.org 实测复现）——服务器验的不是头是"谁在握手"。
+    两条子路都流式：inline 响应走 resp.body()（content-length 预检防大文件
+    涨内存）；触发下载事件走 Chromium 原生落盘 + 磁盘拷贝（零内存压力）。"""
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return None
+    with sync_playwright() as p:
+        browser = None
+        try:
+            browser = _launch_chromium(p, headless=True, args=_browser_launch_args(safe))
+            context = browser.new_context(
+                user_agent=random.choice(USER_AGENTS),
+                accept_downloads=True,
+                ignore_https_errors=True,
+            )
+            _apply_stealth(context, "basic")
+            page = context.new_page()
+            download_holder: Dict = {}
+            page.on("download", lambda d: download_holder.setdefault("d", d))
+            resp = None
+            _goto_err = ""
+            try:
+                _goto_kw = {"wait_until": "commit", "timeout": 30000}
+                if referer:
+                    _goto_kw["referer"] = referer  # 热链站：来源页当 referer
+                resp = page.goto(url, **_goto_kw)
+            except Exception as exc:
+                resp = None
+                _goto_err = str(exc)
+            # 实测排雷：goto 抛 "Download is starting" 时下载事件还在路上（异步后到），
+            # 异常后立刻查事件必查空——必须轮询等事件到达。
+            if not download_holder.get("d"):
+                _wait = 12 if "download" in _goto_err.lower() else 3
+                _deadline = time.time() + _wait
+                while not download_holder.get("d") and time.time() < _deadline:
+                    try:
+                        page.wait_for_timeout(200)
+                    except Exception:
+                        break
+            # 子路1：下载事件（Chromium 已流式落盘到临时文件）
+            if download_holder.get("d"):
+                try:
+                    d = download_holder["d"]
+                    src = Path(d.path())
+                    if src.exists() and src.stat().st_size >= 64:
+                        fname = _cap_filename(d.suggested_filename or "file")
+                        if safe:
+                            reason = _safe_save_reason(fname, src.stat().st_size)
+                            if reason:
+                                sys.stderr.write(f"[safe-block] 浏览器取件拒绝 {reason}: {fname}\n")
+                                return None
+                        output_dir.mkdir(parents=True, exist_ok=True)
+                        dst = output_dir / fname
+                        import shutil
+                        shutil.move(str(src), str(dst))
+                        return {"url": url, "path": str(dst), "size": dst.stat().st_size,
+                                "kind": "file", "via": "browser-download"}
+                except Exception as exc:
+                    sys.stderr.write(f"[file-dl:browser] download error: {exc}\n")
+            # 子路2：inline 响应体（PDF 预览等）
+            if resp is not None:
+                try:
+                    ct = (resp.headers.get("content-type", "") or "").lower().split(";")[0].strip()
+                    if ct in ("text/html", "application/xhtml+xml"):
+                        return None  # 网页壳：不算文件
+                    cl = resp.headers.get("content-length", "")
+                    if cl.isdigit() and int(cl) > 512 * 1024 * 1024:
+                        sys.stderr.write(f"[file-dl:browser] 响应体过大({int(cl)//1048576}MB)不走内存路: {url[:120]}\n")
+                        return None
+                    body = resp.body()
+                    if len(body) >= 64:
+                        if safe:
+                            reason = _safe_save_reason(_safe_filename(url, ct, 0), len(body))
+                            if reason:
+                                sys.stderr.write(f"[safe-block] 浏览器取件拒绝 {reason}: {url[:120]}\n")
+                                return None
+                        path = _save_bytes(body, output_dir, url, ct, 80000)
+                        return {"url": url, "path": str(path), "size": len(body),
+                                "kind": "file", "via": "browser-body"}
+                except Exception as exc:
+                    sys.stderr.write(f"[file-dl:browser] body error: {exc}\n")
+            return None
+        finally:
+            if browser is not None:
+                try:
+                    browser.close()
+                except Exception:
+                    pass
 
 
 def _zip_bundle(folder: Path, output_dir: Path) -> Optional[str]:
@@ -1206,6 +1724,7 @@ def _page_fetch_download(page, url: str, output_dir: Path, safe: bool = False) -
         return None  # 网页不是文件本体
     fname = _filename_from_disposition(type("R", (), {"headers": {}})(), url)
     fname = re.sub(r'[\\/:*?"<>|]+', "_", fname).strip(" .") or "file"
+    fname = _cap_filename(fname) or "file"
     if safe and _safe_save_reason(fname, len(data)):
         return None
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -1230,13 +1749,15 @@ def _files_route(
        激进模式默认关闭：会程序化点击页面按钮。"""
     base = {"mode": "url", "source_url": url, "output_dir": str(output_dir), "method": "files"}
 
-    # 1) 文件直链
+    # 1) 文件直链（两招阶梯：urllib 流式 → Chromium 指纹，治 JA3 拦截）
     if urllib.parse.urlparse(url).path.lower().endswith(FILE_EXTS):
         item = _file_direct_download(url, output_dir, safe)
+        if not item:
+            item = _file_browser_fetch(url, output_dir, safe)
         if item:
             return {**base, "saved": [item], "count": 1}
         return {**base, "saved": [], "count": 0,
-                "error": "file direct download failed (link dead / is a webpage)"}
+                "error": "file direct download failed (link dead / TLS-blocked / is a webpage)"}
 
     # 2) 页面：收集文件链接逐个下载
     saved: List[Dict] = []
@@ -1513,6 +2034,14 @@ def _harvest_route(url: str, output_dir: Path, headed: bool, safe: bool,
                             real_target = _extract_shell_redirect(page.content())
                         except Exception:
                             real_target = None
+                        # v1.22.1 网易云压测排雷④：跳向站点首页/裸域 = 降级不是跟进
+                        # （网易云歌页 canonical 指首页，0 收割时被带去首页再空转一轮）
+                        try:
+                            _p = urllib.parse.urlparse(real_target or "")
+                            if not (_p.path.strip("/") or _p.query or _p.fragment.strip("#/")):
+                                real_target = None
+                        except Exception:
+                            pass
                         if real_target and real_target not in (url, final_url):
                             sys.stderr.write(f"[harvest] 跟进跳转壳: {real_target[:120]}\n")
                             page.goto(real_target, wait_until="domcontentloaded", timeout=30000)
@@ -1576,7 +2105,9 @@ def _browser_route(url: str, output_dir: Path, wait_seconds: int, method: str,
     内部再降级会让 yt-dlp 整链跑 3 次（压测实测），且 attempts 错误被 yt-dlp 文本顶替。"""
     saved: List[Dict] = []
     seen: set = set()
-    body_hashes: set = set()  # 非 cache 模式内容指纹：同文件重复响应（字节相同）去重
+    body_hashes: set = set()  # 内容指纹：同文件重复响应（字节相同）去重（两种模式都开）
+    media_streams: Dict[str, Dict] = {}  # 分段流账本（先要后抓）：URL → {total, max_seg}
+    dup_segs = {"count": 0}  # cache 模式字节级重复分段计数（登录墙/服务器无视 Range 的诊断信号）
     counter = 0
 
     from playwright.sync_api import sync_playwright
@@ -1623,15 +2154,61 @@ def _browser_route(url: str, output_dir: Path, wait_seconds: int, method: str,
                     if key in seen:
                         return
                     seen.add(key)
-                    body = response.body()
-                    if len(body) < 1024:
+                    # 206 分段偏移捕获（v1.22.1 修合并失败根源①）：Content-Range 记下
+                    # 文件内偏移，合并时按偏移排序——并行请求到达序 ≠ 文件序，旧逻辑
+                    # 按到达序字节拼接 = 必然损坏 → 解码验证必挂。
+                    range_start = None
+                    range_total = None
+                    try:
+                        cr = response.headers.get("content-range", "")
+                        m = re.match(r"bytes\s+(\d+)-(\d+)/(\d+|\*)", cr)
+                        if m:
+                            range_start = int(m.group(1))
+                            if m.group(3) != "*":
+                                range_total = int(m.group(3))
+                    except Exception:
+                        range_start = None
+                    try:
+                        body = response.body()
+                    except Exception as exc:
+                        # v1.22.1 快手压测排雷：大体积流响应体在 inspector 缓存被
+                        # 逐出（或页面已导航走）→ body() 拿不到，整条流静默丢失
+                        # （快手实测：60s 正片丢、5.6s 推荐流反而成了"成品"）。
+                        # URL 记入整取账本（先要后抓），后续 _refetch_full_media
+                        # 用 HTTP 全量重取；CL 不可知时给 0（该 URL 不具候选资格）。
+                        sys.stderr.write(f"[network-save] body 不可读（{str(exc)[:60]}），"
+                                         f"记入整取账本: {response.url[:100]}\n")
+                        if kind in ("video", "audio"):
+                            try:
+                                _cl = int(cl or 0)
+                            except (TypeError, ValueError):
+                                _cl = 0
+                            msi = media_streams.setdefault(
+                                response.url, {"total": 0, "max_seg": 0})
+                            msi["total"] = max(msi.get("total") or 0, _cl or (range_total or 0))
                         return
-                    if not capture_cache:
-                        # 内容指纹去重：同一文件的重复响应（缓存穿透/重试）字节相同即砍
-                        body_hash = hashlib.md5(body).hexdigest()
-                        if body_hash in body_hashes:
-                            return
-                        body_hashes.add(body_hash)
+                    # 小体量门槛：普通响应 1KB 起；缓存分段模式放宽到 64B——
+                    # fMP4 init 段（moov 头）常只有几百字节，旧一刀切 1KB 把它砍了，
+                    # 后面 m4s 分段拼出来永远没有 moov 头 = 必然解不开（v1.22.1 根源②）。
+                    seg_ext = Path(urllib.parse.urlparse(response.url).path).suffix.lower()
+                    min_body = 64 if (capture_cache and seg_ext in (".mp4", ".m4s", ".ts")) else 1024
+                    if len(body) < min_body:
+                        return
+                    # 内容指纹去重（v1.22.1 扩到 cache 分段）：字节级相同的响应 = 重传，
+                    # 只留一份。治两类实测病：①登录墙站无视 Range 请求，每次都回同一个
+                    # 200KB 块（抖音实测 11×204801B 重复块，旧逻辑拼 11 份必坏再丢弃）；
+                    # ②同一 init 段(moov头)经两条 URL 到达，拼两个 moov 也是坏文件。
+                    body_hash = hashlib.md5(body).hexdigest()
+                    if body_hash in body_hashes:
+                        if capture_cache:
+                            dup_segs["count"] += 1
+                            if dup_segs["count"] in (3, 10):
+                                sys.stderr.write(
+                                    f"[network-save] 已连续丢弃 {dup_segs['count']} 个字节级重复分段："
+                                    "服务器未按 Range 放流（疑似登录墙/截断），"
+                                    "建议带 cookie 重试（--cookies-from-browser / --login-rescue）\n")
+                        return
+                    body_hashes.add(body_hash)
                     # 垃圾资源：图片图标任何模式都挡；视频/音频垃圾只在非分段模式挡（分段是正片不能误删）
                     is_junk = _is_junk_resource(response.url, content_type, len(body))
                     if (kind == "image" and is_junk) or (not capture_cache and is_junk):
@@ -1652,6 +2229,15 @@ def _browser_route(url: str, output_dir: Path, wait_seconds: int, method: str,
                         # 缓存模式：连 206 分段也保存，放在 cache_segments 子目录。
                         seg_dir = output_dir / "cache_segments"
                         path = _save_bytes(body, seg_dir, response.url, content_type, counter)
+                        # 先要后抓线索（v1.22.1 范式升级）：视频/音频分段流记下
+                        # "整文件重取"候选——Content-Range 总长远大于单块 = 单文件
+                        # Range 流（抖音式），完整 GET 大概率能拿到全量。
+                        if kind in ("video", "audio"):
+                            msi = media_streams.setdefault(
+                                response.url, {"total": 0, "max_seg": 0})
+                            if range_total:
+                                msi["total"] = max(msi["total"], range_total)
+                            msi["max_seg"] = max(msi["max_seg"], len(body))
                         saved.append(
                             {
                                 "url": response.url,
@@ -1660,6 +2246,8 @@ def _browser_route(url: str, output_dir: Path, wait_seconds: int, method: str,
                                 "size": len(body),
                                 "status": response.status,
                                 "seq": counter,
+                                "range_start": range_start,
+                                "range_total": range_total,
                                 "kind": "cache-segment",
                             }
                         )
@@ -1683,6 +2271,9 @@ def _browser_route(url: str, output_dir: Path, wait_seconds: int, method: str,
                 try:
                     filename = download.suggested_filename or f"download_{int(time.time())}_{counter}"
                     filename = re.sub(r'[\\/:*?"<>|]+', "_", filename).strip(" .")
+                    # 站点文件名硬限长（v1.22.1）：超长名 + 深目录会撞 Windows 260 上限，
+                    # 三路写入全挂。stem 截 80 保扩展名。
+                    filename = _cap_filename(filename)
                     # 安全模式：下载文件名白名单（suggested_filename 站点完全可控，必须挡 exe 等）
                     if safe:
                         reason = _safe_save_reason(filename, 0)
@@ -1780,9 +2371,32 @@ def _browser_route(url: str, output_dir: Path, wait_seconds: int, method: str,
             # 额外抓取 blob:/MSE 媒体（B站/抖音常见；JS 内部限时，不会挂死）。
             saved.extend(_capture_blob_media(page, output_dir, safe))
 
+            # 先要后抓（v1.22.1 范式升级）：分段流整文件重取优先——抖音类站
+            # 播放器的 Range 请求被服务器糊弄（永远同一个 ~200KB 块），但完整
+            # GET 照常给全量。要到了免拼装；要不到继续走下面的分段抓取合并。
+            # 放 harvest 前：重取成功的 URL 进 seen，收割不再重复下载同一资源。
+            try:
+                refetched = _refetch_full_media(page, url, media_streams, output_dir, safe, seen)
+                if refetched:
+                    saved.extend(refetched)
+            except Exception as exc:
+                sys.stderr.write(f"[refetch] error: {exc}\n")
+
             # 缓存方式3：DOM/元数据/内嵌JSON 收割 + 页面上下文下载（照片/音频常靠这路拿到）。
             try:
-                saved.extend(_harvest_dom_media(page, url, output_dir, allowed_kinds, seen, save_junk, safe=safe))
+                # 已落盘内容 hash 集（收割内容去重用）：嗅探/整取已拿到的流/图
+                # 逐字节重复的第二份不再落盘（抖音实测 media.mp4 816KB×2）。
+                _dh = set()
+                for _i in saved:
+                    try:
+                        _fp = Path(_i.get("path", ""))
+                        if _fp.exists() and _fp.stat().st_size:
+                            _dh.add(hashlib.md5(_fp.read_bytes()).hexdigest())
+                    except Exception:
+                        pass
+                saved.extend(_harvest_dom_media(page, url, output_dir, allowed_kinds,
+                                                seen, save_junk, safe=safe,
+                                                dedup_hashes=_dh))
             except Exception as exc:
                 sys.stderr.write(f"[harvest] error: {exc}\n")
 
@@ -1794,6 +2408,10 @@ def _browser_route(url: str, output_dir: Path, wait_seconds: int, method: str,
                     saved = [i for i in saved if i.get("kind") != "cache-segment"] + merged
                 else:
                     saved = saved + merged
+            elif cleanup_info.get("removed_paths"):
+                # 无合并产物但有分段被整文件重取取代：剔除已删盘的 phantom 条目
+                _rp = cleanup_info["removed_paths"]
+                saved = [i for i in saved if i.get("path") not in _rp]
         finally:
             if browser is not None:
                 browser.close()
@@ -1833,6 +2451,9 @@ def _browser_route(url: str, output_dir: Path, wait_seconds: int, method: str,
             "count": len(saved),
             "method": "playwright",
             "wait_actual_sec": actual_wait,
+            # 质量分级（v1.22.1）：junk = 只有分段残件/封面图等零交集产物。
+            # 独立调用方据此降级；chain 据此不截断兜底链（垃圾不算成功）。
+            "quality": _assess_saved_quality(saved, allowed_kinds),
         }
         try:
             result["cleanup"] = cleanup_info
