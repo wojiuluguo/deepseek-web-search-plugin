@@ -4,7 +4,7 @@ English | **[中文](README.zh-CN.md)**
 
 An [OpenClaw](https://github.com/openclaw) skill that gives DeepSeek real web search **and** an auto-save browser that downloads videos/audio/images/files from any webpage it opens — plus a vision mode for multimodal models (see a page, operate a page).
 
-> Current version **v1.22.0** (2026-08-24) · Author: user (Douyin ID: 94636651553) · [Changelog](#changelog)
+> Current version **v1.22.1** (2026-08-25) · Author: user (Douyin ID: 94636651553) · [Changelog](#changelog)
 
 <p align="center"><img src="assets/mascot.png" alt="deepseek-web-search mascot" width="220"></p>
 
@@ -225,6 +225,18 @@ deepseek-web-search-plugin/
 - **Cost note**: Vision mode (`--method vision`, headless browser session) is billed per screenshot and costs a nontrivial amount — not recommended for general users; all other routes (search/download/text) are completely free
 
 ## Changelog
+
+### v1.22.1 (2026-08-25)
+
+Fallback-chain activation ("request first, capture later") + 17 fixes from 5-platform stress tests. No usage changes — pure bug fixes plus one paradigm upgrade.
+
+- **New media-fetch paradigm — "request first, capture later" (6-move ladder, feedback-driven, stop on first success, ≤6 total attempts)**: ① tab (in-page fetch with full cookies/referer) → ② desktop (HTTP, desktop UA + referer) → ③ mobile (mobile UA) → ④ bare (no referer) → ⑤ refresh (reload page for a fresh signed URL) → ⑥ fallback round. Feedback-driven: 403 → switch persona; truncated 200 → jump to refresh for a new ticket; 416 → pure GET.
+- **Douyin (5)**: segment merger now sorts by Content-Range file offset (out-of-order arrival was corrupting every merge); fMP4 init segment (moov header) merged into its group; byte-identical duplicate segments dropped (login-wall 11×204801B re-sends no longer corrupt files); promo-material domains (douyinstatic/bytednsdoc — an 11MB PC-client installer video!) vetoed at domain level; JSON-escaped URLs (`\/`, `\u002F`) decoded and pseudo-extensions (.image/.awebp) recognized so gallery images stop being missed.
+- **Kuaishou (4)**: a complete stream arriving as a single response is now promoted directly (the old "merge needs ≥2 segments" rule was killing whole videos); 206 partial blocks must cover through EOF before promotion; unreadable response bodies (inspector cache evicted) are recorded to the full-refetch ledger instead of silently losing the stream; escaped gallery URLs pre-decoded.
+- **Bilibili (4)**: CDN mirror dedupe (path + basename dual gauge, mcdn route prefix normalized — same file was being downloaded 2–3×); content-hash dedupe (byte-identical second copy dropped); yt-dlp product quality-gate fix (a short-circuit `url or path` misjudged 21.5MB files as junk, sending the whole chain re-fetching 188MB); site-asset domain blocked (13MB wallpaper pack).
+- **NetEase Music / Xiaohongshu (4)**: yt-dlp progress lines no longer pollute `--json` stdout (`noprogress`); iframe-rendered pages (NetEase g_iframe) now harvested; homepage redirects recognized as downgrades (not follow-through); Xiaohongshu login-wall decoration images blocked (fe-platform.xhscdn).
+- **General**: **exit-code semantics — success (real yield) = 0, failure/junk-only = 1** (previously always 0, hosts couldn't retry on failure); quality gate backfilled for files/direct/text routes (a 60MB intact download used to report `quality: null`); Chromium channel preference + hardware video decode disabled + SwiftShader software rendering (root-causes the sandbox false-kill on AI hosts); JSON serialization `default=str` guard (a `set` once crashed output); install_dependencies.py pip detection fix.
+- **Stress-test matrix (all passing)**: NetEase Music via ytdlp (full), Bilibili via browser (full — streams + covers, dedupe active), Douyin via chain (full — promo material blocked, exit 0), 60MB file via files (byte-exact match), small exe via files (full).
 
 ### v1.22.0 (2026-08-24)
 

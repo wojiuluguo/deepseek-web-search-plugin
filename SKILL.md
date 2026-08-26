@@ -1,8 +1,8 @@
 ---
 name: deepseek-web-search
 description: DeepSeek 联网搜索技能。遇到实时信息、事实核查、新闻、价格、代码报错、未知名词或用户说“搜一下”时，必须使用本技能搜索并附来源。
-version: 1.22.0
-updated: 2026-08-24
+version: 1.22.1
+updated: 2026-08-25
 author: user（抖音号: 94636651553）
 license: MIT
 tags: [web, search, deepseek, 联网, 搜索]
@@ -315,6 +315,10 @@ python "{baseDir}/scripts/auto_save_browser.py" --query "用户想找的内容" 
 默认保存到 `{baseDir}/downloads/cache`。
 
 默认使用 `--method chain`（v1.13.0 扩容）：自动按顺序尝试 `direct → ytdlp → browser → cache → harvest → text` 六条路，哪步失败自动换下一个，哪步成功立即返回（输出 `attempts` 数组记录每步的成败与错误）。带了 cookie 参数且全链失败时，还会追加 `ytdlp+cookies` 复试一搏。如果专门想抓 206 分段缓存（m4s/音频分片），用 `--method cache`，文件会保存到 `downloads/cache/cache_segments/`。
+
+**先要后抓（v1.22.1 范式升级）**：抓流前先试整文件直接获取——六招阶梯（tab 页签 fetch → desktop 桌面 UA → mobile 移动 UA → bare 裸取 → refresh 换新鲜签名 URL → 兜底轮），反馈驱动（403 换人设 / 截断换票 / 416 换纯 GET），成功即停总尝试 ≤6；整取失败才回退分段抓取合并。免拼装、少拉流、快。无需任何参数，自动生效。
+
+**退出码与质量门（v1.22.1）**：`exit 0` = 有正果（saved 非空且 quality ≠ junk），`exit 1` = 失败（全链空手或只有残件/封面级产物）。JSON 输出 `quality` 字段四级：`full`（完整成品，含解码验证过的合并正片）/ `partial`（有目标类型内容但未过验证）/ `junk`（与目标零交集：残件/封面/装饰图）/ `empty`（无产物）。宿主可据此降级重试，AI 应如实转述 quality 而非只看 count。
 
 **登录态下载（v1.13.0，`--cookies` / `--cookies-from-browser`）**：抖音/B站等登录墙站点不给匿名访客视频流，带登录 cookie 才放行。两种给法：
 

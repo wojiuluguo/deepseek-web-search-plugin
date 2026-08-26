@@ -4,7 +4,7 @@
 
 OpenClaw Skill：让 DeepSeek 模型能搜索、会搜索、并且"该搜就搜"，还能自动下载网页里的视频/音频/图片/文件，多模态模型还能"看页面+操作页面"。
 
-> 当前版本 **v1.22.0**（2026-08-24）· 作者：user（抖音号: 94636651553）· [更新记录](#更新记录)
+> 当前版本 **v1.22.1**（2026-08-25）· 作者：user（抖音号: 94636651553）· [更新记录](#更新记录)
 
 <p align="center"><img src="assets/mascot.png" alt="deepseek-web-search 吉祥物" width="220"></p>
 
@@ -227,6 +227,18 @@ deepseek-web-search-plugin/
 - **费用提醒**：视觉模式（`--method vision` 无头浏览器会话）按截图付费，消费金额较大，一般用户不推荐使用；搜索/下载/抓正文等其他路线全部免费
 
 ## 更新记录
+
+### v1.22.1（2026-08-25）
+
+兜底链活化（"先要后抓"）+ 五平台压测修复 17 项。用法零变化——纯修 bug + 一次范式升级。
+
+- **媒体获取新范式——"先要后抓"六招阶梯（反馈驱动，成功即停，总尝试 ≤6）**：① tab（页签原生 fetch，cookie/referer 齐全）→ ② desktop（HTTP 桌面 UA + referer）→ ③ mobile（移动 UA）→ ④ bare（不带 referer）→ ⑤ refresh（刷新页面换新鲜签名 URL）→ ⑥ 兜底轮。反馈驱动：403 → 换人设；200 截断 → 跳 refresh 换票；416 → 换纯 GET。
+- **抖音（5 项）**：合并引擎按 Content-Range 文件偏移排序（乱序到达必拼坏文件的根源）；fMP4 init 段（moov 头）并入同组；字节级重复分段去重（登录墙 11×204801B 重传块不再拼坏文件）；推广物料域一票否决（douyinstatic/bytednsdoc——11MB 的 PC 客户端安装推广视频！）；JSON 转义 URL（`\/`、`\u002F`）还原 + 伪扩展名（.image/.awebp）识别，图集不再漏图。
+- **快手（4 项）**：单响应完整流直接转正（旧"至少 2 段才拼"规则在杀整条视频）；206 部分块须覆盖到文件尾才转正；body 不可读（缓存逐出）记入整取账本不再静默丢流；滑图帖转义 URL 预还原。
+- **B站（4 项）**：CDN 镜像去重（路径 + basename 双尺，mcdn 路由前缀归一——同一文件曾下 2-3 份）；内容 hash 去重（逐字节相同的第二份丢弃）；yt-dlp 产物质量门修正（`url or path` 短路写法把 21.5MB 成品误判 junk → 全链重抓 188MB）；站点物料域拦截（13MB 壁纸包）。
+- **网易云/小红书（4 项）**：yt-dlp 进度条不再污染 `--json` stdout（noprogress）；iframe 渲染页（网易云 g_iframe）正文/媒体收割；跳首页识别为降级（不跟进）；小红书登录墙装饰图域拦截（fe-platform.xhscdn）。
+- **通用**：**退出码语义——有正果 = 0，失败/全 junk = 1**（原恒 return 0，宿主无法降级重试）；files/direct/text 专用线质量门补齐（60MB 完整下载曾报 quality: null）；Chromium 通道择优 + 禁视频硬解 + SwiftShader 软渲染（根治 AI 宿主沙箱误杀）；JSON 序列化 default=str 兜底（set 类型曾崩溃）；install_dependencies.py pip 检测修复。
+- **压测矩阵（全通过）**：网易云 ytdlp（full）、B站 browser（full，流+封面，去重生效）、抖音 chain（full，推广物料全拦，exit 0）、60MB 文件 files（字节精确匹配）、小文件 exe files（full）。
 
 ### v1.22.0（2026-08-24）
 
