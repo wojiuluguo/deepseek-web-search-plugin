@@ -1,7 +1,7 @@
 ---
 name: deepseek-web-search
 description: DeepSeek 联网搜索技能。遇到实时信息、事实核查、新闻、价格、代码报错、未知名词或用户说“搜一下”时，必须使用本技能搜索并附来源。
-version: 1.23.1
+version: 1.23.2
 updated: 2026-09-14
 author: user（抖音号: 94636651553）
 license: MIT
@@ -24,6 +24,8 @@ tags: [web, search, deepseek, 联网, 搜索]
 | 3 引擎交叉验证真假 | `cross_search.py` |
 | 看网页正文 | `auto_save_browser.py --method text` |
 | 下载视频/抖音/B站 | `auto_save_browser.py --url ...` |
+| 要合集整单/转音频/限清晰度 | `auto_save_browser.py` 加 `--playlist --playlist-max N` / `--extract-audio --audio-format mp3` / `--quality 720p`（v1.23.0 起，默认行为不变） |
+| 海外网络/被限流 | 下载命令加 `--proxy "http://host:port"`（贯通浏览器/urllib/yt-dlp/--query 搜索步；搜索另有 `search_browser.py --proxy`） |
 | 只要照片/音频 | `auto_save_browser.py --method harvest --media-type image/audio`；或 `--query "词" --auto --media-type image/audio`（自动走图片/音频专用线） |
 | 下载文件（压缩包/文档/表格/文本/安装包） | `auto_save_browser.py --url 文件直链或页面`（自动走 files 专用线）；文件夹页多文件逐个下，`--zip` 打包成一个 |
 | 抓文章正文/小说章节 | `auto_save_browser.py --url 文章或目录页 --media-type text`（text 专用线：单页正文/小说目录逐章合并成 txt/txt直链直下，`--max-chapters` 控制上限） |

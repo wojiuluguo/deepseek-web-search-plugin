@@ -4,7 +4,7 @@ English | **[中文](README.zh-CN.md)**
 
 An [OpenClaw](https://github.com/openclaw) skill that gives DeepSeek real web search **and** an auto-save browser that downloads videos/audio/images/files from any webpage it opens — plus a vision mode for multimodal models (see a page, operate a page).
 
-> Current version **v1.23.1** (2026-09-14) · Author: user (Douyin ID: 94636651553) · [Changelog](#changelog)
+> Current version **v1.23.2** (2026-09-14) · Author: user (Douyin ID: 94636651553) · [Changelog](#changelog)
 
 <p align="center"><img src="assets/mascot.png" alt="deepseek-web-search mascot" width="220"></p>
 
@@ -232,6 +232,14 @@ deepseek-web-search-plugin/
 - **Cost note**: Vision mode (`--method vision`, headless browser session) is billed per screenshot and costs a nontrivial amount — not recommended for general users; all other routes (search/download/text) are completely free
 
 ## Changelog
+
+### v1.23.2 (2026-09-14)
+
+Stress-test finale: the `--query --auto` full-pipeline stress test caught a **link-picking flaw dating back to v1.22.0** and root-cures it; the skill's quick-pick table gains the new switches.
+
+- **Fix: section pages hijacking link picking** — searching "B站 猫 视频", the platform round selected `t.bilibili.com/index.html` / `bilibili.com/read/home` (section/pseudo homepages) on host match alone, and the whole chain harvested avatar thumbnails on the wrong page (junk). Two platform-agnostic layers: `_is_bare_homepage` now recognizes homepage filenames (index.html/htm, default, home); a new `_looks_like_item_page` gate requires an item-page shape (path with /video/, BV-id, watch keywords, or an ID-like last segment — covers both youtu.be short IDs and numeric IDs), applied to both picking rounds. **Verified live**: the same query now lands on a sogou redirect → yt-dlp resolves the real video BV1GVMszFETr → 2.7MB mp4, quality=full, exit 0.
+- **tests**: new `test_routing_offline.py` (18 assertions for bare-homepage/item-page verdicts); suite grows to 5 files.
+- Stress matrix (v1.23.1 code + this fix): full suite (5 files), Bilibili `--quality 480p` (full), `--extract-audio mp3` (full), dead-port proxy fast-fail (`WinError 10061` proves proxy reaches yt-dlp), `.manifest.jsonl` ledger on disk, `--query --auto` full pipeline (junk before the fix → full after).
 
 ### v1.23.1 (2026-09-14)
 

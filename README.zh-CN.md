@@ -4,7 +4,7 @@
 
 OpenClaw Skill：让 DeepSeek 模型能搜索、会搜索、并且"该搜就搜"，还能自动下载网页里的视频/音频/图片/文件，多模态模型还能"看页面+操作页面"。
 
-> 当前版本 **v1.23.1**（2026-09-14）· 作者：user（抖音号: 94636651553）· [更新记录](#更新记录)
+> 当前版本 **v1.23.2**（2026-09-14）· 作者：user（抖音号: 94636651553）· [更新记录](#更新记录)
 
 <p align="center"><img src="assets/mascot.png" alt="deepseek-web-search 吉祥物" width="220"></p>
 
@@ -234,6 +234,14 @@ deepseek-web-search-plugin/
 - **费用提醒**：视觉模式（`--method vision` 无头浏览器会话）按截图付费，消费金额较大，一般用户不推荐使用；搜索/下载/抓正文等其他路线全部免费
 
 ## 更新记录
+
+### v1.23.2（2026-09-14）
+
+压测收官版：`--query --auto` 全链路压测揪出一个 v1.22.0 时代的**挑链缺陷**并根治，选脚本表补齐新开关。
+
+- **修：挑链被站点栏目页抢位**——搜"B站 猫 视频"，平台轮只看 host 匹配就选中 `t.bilibili.com/index.html`、`bilibili.com/read/home` 这类栏目/伪首页，chain 全链在错误页面上收割头像缩略图（junk）。两级修复（平台无关）：`_is_bare_homepage` 补首页文件名判定（index.html/htm、default、home）；新增 `_looks_like_item_page` 条目页判定（路径含 /video/、BV号、watch 等关键词，或末段为 ID 形态——youtu.be 短 ID 与纯数字 ID 都覆盖），两轮挑选全部加门。**实测修通**：同查询现在落到搜狗跳转链 → yt-dlp 跟出真视频 BV1GVMszFETr → 2.7MB mp4，quality=full，exit 0。
+- **tests**：新增 `test_routing_offline.py`（裸首页/条目页判定 18 项断言），套件增至 5 文件。
+- 压测矩阵（v1.23.1 代码 + 本修复）：全套件 5 文件、B站 `--quality 480p`（full）、`--extract-audio mp3`（full）、死端口代理快速失败（`WinError 10061` 证明 proxy 贯通 yt-dlp）、`.manifest.jsonl` 台账落盘、`--query --auto` 全链路（修复前 junk → 修复后 full）。
 
 ### v1.23.1（2026-09-14）
 

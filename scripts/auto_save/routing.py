@@ -22,11 +22,23 @@ __all__ = [
 
 
 def _is_bare_homepage(u: str) -> bool:
-    """平台裸首页（路径只有 / 或空）：是官网入口，不是具体视频页。
+    """平台裸首页（路径只有 / 或空，或指向首页文件）：是官网入口，不是具体视频页。
     压测发现：搜"抖音 猫 视频"时引擎返回 douyin.com 首页，被当视频链接挑中，
-    开出来的只有首页宣传片——必须跳过，让兜底逻辑去平台搜索页。"""
+    开出来的只有首页宣传片——必须跳过，让兜底逻辑去平台搜索页。
+    v1.23.2 压测二次排雷（B站）：t.bilibili.com/index.html 这类"伪首页"
+    （动态子域 + 首页文件名）路径非空，旧判定漏网——平台轮 host 匹配就选中，
+    chain 全链在动态首页上收割头像缩略图。补常见首页文件名判定（平台无关）：
+    真视频页路径（/video/BVxxx、/video/数字）不含这些文件名，误杀风险≈0。"""
     try:
-        return urllib.parse.urlparse(u).path.strip("/") == ""
+        p = urllib.parse.urlparse(u)
+        path = p.path.strip("/").lower()
+        if path == "":
+            return True
+        # 伪首页：站点根入口的常见文件名（不带更深的目录）
+        return "/" not in path and path in (
+            "index.html", "index.htm", "index.shtml",
+            "default.html", "default.htm", "home.html", "home.htm",
+        )
     except Exception:
         return False
 
@@ -53,6 +65,32 @@ def _platform_search_url(query: str) -> str:
     if any(w in q for w in ("youtube", "油管")):
         return f"https://www.youtube.com/results?search_query={kw}"
     return ""
+
+
+_ITEM_PATH_RE = re.compile(
+    r"(?:/video/|/note/|/short-video/|/watch|/clip/|/status/|bv[\w]{6,}|/av\d+)", re.I)
+
+
+def _looks_like_item_page(u: str) -> bool:
+    """内容条目页判定（平台无关弱启发，v1.23.2 压测排雷）：
+    挑链路只该挑"能开出媒体的条目页"，站点栏目首页（/read/home、/index.html、
+    动态页）不该抢位——旧逻辑只看 host 匹配，B站专栏首页/动态首页轮番抢中，
+    chain 全链在错误页面上收割垃圾。判据：路径含条目关键词（/video/、BV号、
+    watch 等）或末段是 ID 形态（≥6 位字母数字 / ≥4 位连续数字，youtu.be 短 ID
+    靠前者、抖音/西瓜纯数字 ID 靠后者）。防误杀：真视频 URL 全部有 ID 形态。"""
+    try:
+        p = urllib.parse.urlparse(u)
+        path = p.path.lower()
+        if _ITEM_PATH_RE.search(path):
+            return True
+        last = path.rstrip("/").rsplit("/", 1)[-1]
+        if not last:
+            return False
+        if re.fullmatch(r"[a-z0-9_-]{6,}", last) and re.search(r"\d", last):
+            return True  # 字母数字混合长 ID（youtu.be/dQw4w9WgXcQ 式）
+        return bool(re.search(r"\d{4,}", last))  # 末段长数字 ID（抖音/西瓜式）
+    except Exception:
+        return False
 
 
 def _pick_video_url(results: List[Dict[str, str]], query: str = "") -> str:
@@ -82,7 +120,7 @@ def _pick_video_url(results: List[Dict[str, str]], query: str = "") -> str:
     def _host_of(u: str) -> str:
         return urllib.parse.urlparse(u).netloc.lower()
 
-    # 第一轮：只挑首选平台的视频链接（跳过裸首页）
+    # 第一轮：只挑首选平台的视频链接（跳过裸首页/伪首页/栏目首页）
     if preferred:
         for r in results:
             url = r.get("url", "")
@@ -90,9 +128,10 @@ def _pick_video_url(results: List[Dict[str, str]], query: str = "") -> str:
                 continue
             for cand in (_decode_redirect_url(url), url):
                 if cand and not _is_bare_homepage(cand) \
+                        and _looks_like_item_page(cand) \
                         and any(_host_matches(_host_of(cand), h) for h in preferred):
                     return cand
-    # 第二轮（无偏好或首选平台无结果）：第一个视频类链接（跳过裸首页）
+    # 第二轮（无偏好或首选平台无结果）：第一个视频类链接（跳过裸首页/栏目首页）
     for r in results:
         url = r.get("url", "")
         if not url:
@@ -100,7 +139,7 @@ def _pick_video_url(results: List[Dict[str, str]], query: str = "") -> str:
         # Try the real URL hidden in redirect links.
         decoded = _decode_redirect_url(url)
         for cand in (decoded, url):
-            if not cand or _is_bare_homepage(cand):
+            if not cand or _is_bare_homepage(cand) or not _looks_like_item_page(cand):
                 continue
             host = _host_of(cand)
             if any(_host_matches(host, vh) for vh in VIDEO_LIKE_HOSTS):
