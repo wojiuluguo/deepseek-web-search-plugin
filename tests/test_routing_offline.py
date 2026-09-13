@@ -39,6 +39,14 @@ check("西瓜纯数字ID是条目页", _looks_like_item_page("https://www.ixigua
 check("专栏首页不是条目页", _looks_like_item_page("https://www.bilibili.com/read/home"), False)
 check("动态伪首页不是条目页", _looks_like_item_page("https://t.bilibili.com/index.html"), False)
 check("根首页不是条目页", _looks_like_item_page("https://www.bilibili.com/"), False)
+# v1.23.3 压测排雷：登录页一票否决 + 音频条目页形态
+check("网易云登录页不是条目页", _looks_like_item_page("https://music.163.com/login"), False)
+check("注册页不是条目页", _looks_like_item_page("https://example.com/register"), False)
+check("网易云歌曲页(query id)是条目页", _looks_like_item_page("https://music.163.com/song?id=186016"), True)
+check("QQ音乐 songDetail 是条目页", _looks_like_item_page("https://y.qq.com/n/ryqq/songDetail/0039MnYb0qxYhV"), True)
+check("酷我 play_detail 是条目页", _looks_like_item_page("https://www.kuwo.cn/play_detail/228708"), True)
+check("喜马拉雅 sound 是条目页", _looks_like_item_page("https://www.ximalaya.com/sound/12345678"), True)
+check("视频页判定不受影响", _looks_like_item_page("https://www.bilibili.com/video/BV1GJ411c7Ud"), True)
 
 print("=" * 40)
 if fails:

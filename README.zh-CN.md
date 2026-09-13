@@ -4,7 +4,7 @@
 
 OpenClaw Skill：让 DeepSeek 模型能搜索、会搜索、并且"该搜就搜"，还能自动下载网页里的视频/音频/图片/文件，多模态模型还能"看页面+操作页面"。
 
-> 当前版本 **v1.23.2**（2026-09-14）· 作者：user（抖音号: 94636651553）· [更新记录](#更新记录)
+> 当前版本 **v1.23.3**（2026-09-14）· 作者：user（抖音号: 94636651553）· [更新记录](#更新记录)
 
 <p align="center"><img src="assets/mascot.png" alt="deepseek-web-search 吉祥物" width="220"></p>
 
@@ -234,6 +234,15 @@ deepseek-web-search-plugin/
 - **费用提醒**：视觉模式（`--method vision` 无头浏览器会话）按截图付费，消费金额较大，一般用户不推荐使用；搜索/下载/抓正文等其他路线全部免费
 
 ## 更新记录
+
+### v1.23.3（2026-09-14）
+
+全平台矩阵压测收官（B站/快手/抖音/微博/网易云/小红书/公众号/小说站/GitHub/w3.org，覆盖视频/图文/文字/音乐/文件五类），修 1 项、实锤 1 项未根治、如实记录若干局限：
+
+- **修：音频电路登录页抢位**——搜"网易云音乐 周杰伦 晴天"，音频轮 host 匹配就把 `music.163.com/login` 当"音频目标"（v1.23.2 只修了视频轮的同类病）。`_looks_like_item_page` 补音频 token（song/songDetail/play_detail/sound/album/playlist/program）+ query `id=\d` 信号（music.163.com/song?id= 式条目页）+ 登录/注册页一票否决；text 轮同跳登录页；`test_routing_offline.py` 补 8 项断言（套件 5 文件全绿）。修复后同查询如实空手（搜索结果里本就没有歌曲页 URL）而非下载登录页。
+- **实锤未根治：网易云歌曲页直链（music.163.com/song?id=）采集卡死**——harvest/chain 超过 15 分钟 stderr 零输出、进程低 CPU 纯等待（iframe 渲染页疑似某步无界等待）。已写入 SKILL.md 错误自愈表（Ctrl+C 终止 + 换 `--method ytdlp`）；根治方向：全局 `--timeout` 看门狗（chain 各步单独有界但总和无界）。
+- **压测矩阵（全部留证 downloads/_stress_v123/）**：快手视频 full（27MB mp4，搜狗跳转→yt-dlp）；抖音视频 full（1.15MB）；微博 full（43 个文件，先要后抓整取 mp4）；B站基线 full（28MB）；图文电路兜百度图片页收 200 张 21.5MB（partial，小红书原图需登录=文档载明局限）；w3.org PDF full（UA 阶梯治 JA3 拦截，v1.22.1 修复实战有效）；西游记章节合并 5/5 章 106KB 单文件（chapters-merged）；公众号文章正文提取 16KB（partial）。
+- **如实记录（非工具 bug）**：arxiv.org 本网络全层不可达（urllib/yt-dlp 连接被重置）；yt-dlp.zip 资产不存在（测试 URL 选错，工具全程如实 404 且 junk→exit 1 语义正确）；海外平台（YouTube/X）未测（网络环境）。
 
 ### v1.23.2（2026-09-14）
 

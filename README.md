@@ -4,7 +4,7 @@ English | **[中文](README.zh-CN.md)**
 
 An [OpenClaw](https://github.com/openclaw) skill that gives DeepSeek real web search **and** an auto-save browser that downloads videos/audio/images/files from any webpage it opens — plus a vision mode for multimodal models (see a page, operate a page).
 
-> Current version **v1.23.2** (2026-09-14) · Author: user (Douyin ID: 94636651553) · [Changelog](#changelog)
+> Current version **v1.23.3** (2026-09-14) · Author: user (Douyin ID: 94636651553) · [Changelog](#changelog)
 
 <p align="center"><img src="assets/mascot.png" alt="deepseek-web-search mascot" width="220"></p>
 
@@ -232,6 +232,15 @@ deepseek-web-search-plugin/
 - **Cost note**: Vision mode (`--method vision`, headless browser session) is billed per screenshot and costs a nontrivial amount — not recommended for general users; all other routes (search/download/text) are completely free
 
 ## Changelog
+
+### v1.23.3 (2026-09-14)
+
+All-platform matrix stress round (Bilibili/Kuaishou/Douyin/Weibo/NetEase/Xiaohongshu/WeChat-article/novel-site/GitHub/w3.org across video, image-text, text, music, files): 1 fixed, 1 confirmed-unfixed honestly, limitations recorded as-is.
+
+- **Fix: audio-circuit login-page hijack** — searching "网易云音乐 周杰伦 晴天", the audio round host-matched `music.163.com/login` as the "audio target" (same family as the v1.23.2 video-circuit bug). `_looks_like_item_page` gains audio tokens (song/songDetail/play_detail/sound/album/playlist/program), a query `id=\d` signal (music.163.com/song?id= style item pages), and a login/register veto; the text circuit skips login pages too; `test_routing_offline.py` +8 assertions (suite all green). After the fix the same query honestly returns empty (no song URL existed in results) instead of downloading a login page.
+- **Confirmed, unfixed: NetEase song-page direct link (music.163.com/song?id=) hangs** — harvest/chain exceeded 15 minutes with zero stderr output, process idling at near-zero CPU (iframe-rendered page, suspected unbounded wait somewhere). Recorded in the SKILL.md self-heal table (Ctrl+C + switch to `--method ytdlp`); the proper cure is a global `--timeout` watchdog (each chain stage is bounded, their sum is not).
+- **Stress matrix (evidence kept in downloads/_stress_v123/)**: Kuaishou video full (27MB mp4 via sogou redirect → yt-dlp); Douyin video full (1.15MB); Weibo full (43 files, request-first refetched mp4s); Bilibili baseline full (28MB); image circuit fell back to Baidu Image and harvested 200 images / 21.5MB (partial; XHS originals need login — documented limitation); w3.org PDF full (UA ladder beats JA3-style Chrome-UA blocking — the v1.22.1 fix works in the field); Journey-to-the-West chapter merge 5/5 chapters into one 106KB txt (chapters-merged); WeChat-article text extraction 16KB (partial).
+- **Recorded honestly (not tool bugs)**: arxiv.org unreachable from this network at every layer (connections reset for urllib and yt-dlp alike); yt-dlp.zip asset does not exist (wrong test URL — the tool 404'd honestly and junk→exit-1 semantics held); overseas platforms (YouTube/X) untested (network environment).
 
 ### v1.23.2 (2026-09-14)
 

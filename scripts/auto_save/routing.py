@@ -68,7 +68,11 @@ def _platform_search_url(query: str) -> str:
 
 
 _ITEM_PATH_RE = re.compile(
-    r"(?:/video/|/note/|/short-video/|/watch|/clip/|/status/|bv[\w]{6,}|/av\d+)", re.I)
+    r"(?:/video/|/note/|/short-video/|/watch|/clip/|/status/|bv[\w]{6,}|/av\d+"
+    r"|/song|songdetail|play_detail|/sound|/album|/playlist|/program)", re.I)
+
+# 登录/注册页是"永非内容页"的平台无关信号——任何电路都不该把它们挑成目标
+_NEVER_ITEM_PATH_RE = re.compile(r"(?:^|/)(?:login|register|signup|signin)(?:[./?#]|$)", re.I)
 
 
 def _looks_like_item_page(u: str) -> bool:
@@ -77,11 +81,19 @@ def _looks_like_item_page(u: str) -> bool:
     动态页）不该抢位——旧逻辑只看 host 匹配，B站专栏首页/动态首页轮番抢中，
     chain 全链在错误页面上收割垃圾。判据：路径含条目关键词（/video/、BV号、
     watch 等）或末段是 ID 形态（≥6 位字母数字 / ≥4 位连续数字，youtu.be 短 ID
-    靠前者、抖音/西瓜纯数字 ID 靠后者）。防误杀：真视频 URL 全部有 ID 形态。"""
+    靠前者、抖音/西瓜纯数字 ID 靠后者）。防误杀：真视频 URL 全部有 ID 形态。
+    v1.23.3 补音频 token（music.163.com/song?id= 这类 query-id 页）+ query
+    id=\d 信号 + 登录/注册页一票否决（v1.23.3 压测排雷：音频电路选中
+    music.163.com/login——登录页 host 匹配音乐站域，旧音频轮无门）。"""
     try:
         p = urllib.parse.urlparse(u)
         path = p.path.lower()
+        if _NEVER_ITEM_PATH_RE.search(path):
+            return False
         if _ITEM_PATH_RE.search(path):
+            return True
+        # query 带数字 id（music.163.com/song?id=186016 式条目页）
+        if re.search(r"(?:^|[?&])id=\d+", p.query, re.I):
             return True
         last = path.rstrip("/").rsplit("/", 1)[-1]
         if not last:
@@ -257,6 +269,9 @@ def _pick_media_url(results: List[Dict[str, str]], query: str, media_type: str =
                 continue
             cand = _decode_redirect_url(url) or url
             host = _host_of(cand)
+            # 登录/注册页永非内容页（平台无关）
+            if _NEVER_ITEM_PATH_RE.search(urllib.parse.urlparse(cand).path.lower()):
+                continue
             if any(_host_matches(host, vh) for vh in VIDEO_LIKE_HOSTS):
                 continue
             if any(_host_matches(host, h) for h in IMAGE_LIKE_HOSTS) or any(_host_matches(host, h) for h in AUDIO_LIKE_HOSTS):
@@ -284,7 +299,10 @@ def _pick_media_url(results: List[Dict[str, str]], query: str, media_type: str =
         for cand in (_decode_redirect_url(url), url):
             if not cand:
                 continue
-            if any(_host_matches(_host_of(cand), h) for h in hosts):
+            # v1.23.3 压测排雷：host 分支加条目页门——music.163.com/login 曾被
+            # 当"音频目标"选中（登录页 host 匹配音乐站域）；直链扩展名分支不受门限
+            if any(_host_matches(_host_of(cand), h) for h in hosts) \
+                    and not _is_bare_homepage(cand) and _looks_like_item_page(cand):
                 return cand
             if urllib.parse.urlparse(cand).path.lower().endswith(exts):
                 return cand
