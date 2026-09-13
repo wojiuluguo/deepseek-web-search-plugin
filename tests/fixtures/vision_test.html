@@ -1,0 +1,13 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>vision e2e test</title></head>
+<body style="margin:20px;font-family:sans-serif">
+<p>视觉会话本地测试页占位正文：这一段是给渲染等待用的，正文长度补足五十个字符以上，避免空白页白等四秒钟。再多补一句。</p>
+<button id="confirmbtn" onclick="document.getElementById('st').textContent = confirm('确定要删除吗?') ? 'confirmed' : 'cancelled'">弹确认框</button>
+<button id="fakeup" onclick="document.getElementById('f').click()">假上传按钮</button>
+<input type="file" id="f" onchange="document.getElementById('fileinfo').textContent = this.files.length ? this.files[0].name : '(none)'">
+<div id="fileinfo">(none)</div>
+<div id="st"></div>
+<iframe src="vision_test_child.html" width="320" height="160"></iframe>
+</body>
+</html>

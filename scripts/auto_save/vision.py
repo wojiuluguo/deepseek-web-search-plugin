@@ -13,7 +13,8 @@ import urllib.request
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from .browser_base import _apply_stealth, _browser_launch_args, _setup_safe_mode, _wait_for_render
+from .browser_base import (_apply_stealth, _browser_launch_args, _proxy_launch_kw,
+                           _setup_safe_mode, _wait_for_render)
 from .constants import USER_AGENTS
 from .cookies import _inject_login_cookies, _login_rescue
 from .humanize import human_click, human_move, human_scroll, human_type
@@ -109,9 +110,9 @@ CURSOR_OVERLAY_JS = """
 
 
 VISION_ACTIONS = ("click", "dblclick", "right_click", "move", "drag", "scroll",
-                  "type", "press", "focus", "elements", "tabs", "switch_tab",
-                  "goto", "back", "forward", "reload", "wait", "screenshot",
-                  "eval", "viewport", "shot_policy", "quit")
+                  "type", "press", "focus", "upload", "dialog", "elements",
+                  "tabs", "switch_tab", "goto", "back", "forward", "reload",
+                  "wait", "screenshot", "eval", "viewport", "shot_policy", "quit")
 
 
 ELEMENTS_JS = """
@@ -119,6 +120,7 @@ ELEMENTS_JS = """
     const out = [];
     const sel = 'a, button, input, select, textarea, [role=button], [onclick], [tabindex]';
     document.querySelectorAll(sel).forEach(el => {
+
         try {
             const r = el.getBoundingClientRect();
             if (r.width < 2 || r.height < 2) return;              // 不可见
@@ -245,16 +247,42 @@ def _eval_watchdog_thread(debug_port: int, timeout_s: float, cancelled, fired) -
 
 def _vision_find_el(page, cmd: Dict, for_type: bool = False):
     """按 selector / 页面文字定位元素。返回 (locator, 定位说明) 或 (None, 原因)。
-    注意：type 指令的 "text" 是要输入的内容（历史语义，不能动），所以 type 只认 selector。"""
+    注意：type 指令的 "text" 是要输入的内容（历史语义，不能动），所以 type 只认 selector。
+    v1.23.0 iframe 支持：主 frame 优先（原行为零变化），主 frame 找不到时逐个子
+    frame 找（count()>0 即存在）——iframe 里的输入框/按钮此前定位必失败。
+    child frame locator 的 bounding_box() 官方语义=相对主 frame 视口，
+    与坐标点击同一基准，_vision_el_center 无需换算。"""
     sel = str(cmd.get("selector", "") or "").strip()
     txt = "" if for_type else str(cmd.get("text", "") or "").strip()
     if sel:
         try:
-            return page.locator(sel).first, f"选择器 {sel}"
-        except Exception as exc:
-            return None, f"选择器无效: {exc}"
+            loc = page.locator(sel).first
+            if loc.count() > 0:
+                return loc, f"选择器 {sel}"
+        except Exception:
+            loc = None
+        for fr in list(page.frames)[1:]:  # [0] 是主 frame，已试过
+            try:
+                cand = fr.locator(sel).first
+                if cand.count() > 0:
+                    return cand, f"选择器 {sel}（iframe: {(fr.url or '')[:60]}）"
+            except Exception:
+                continue
+        if loc is not None:
+            return loc, f"选择器 {sel}"  # 主 frame 原样返回：错误语义与旧行为一致
+        return None, f"选择器无效: {sel}"
     if txt:
-        return page.get_by_text(txt, exact=False).first, f"文字“{txt}”"
+        loc = page.get_by_text(txt, exact=False).first
+        if loc.count() > 0:
+            return loc, f"文字“{txt}”"
+        for fr in list(page.frames)[1:]:
+            try:
+                cand = fr.get_by_text(txt, exact=False).first
+                if cand.count() > 0:
+                    return cand, f"文字“{txt}”（iframe: {(fr.url or '')[:60]}）"
+            except Exception:
+                continue
+        return loc, f"文字“{txt}”"
     return None, "缺少 selector/text 定位参数"
 
 
@@ -468,6 +496,75 @@ def _vision_exec_action(page, cmd: Dict, output_dir: Path, prefix: str,
             el.focus(timeout=3000)
             tag = el.evaluate("e => e.tagName")
             return {"ok": True, "note": f"已聚焦 {tag}（选择器 {sel}）"}
+        elif act == "upload":
+            # 文件上传（v1.23.0）。两招：
+            # ① input 直设：{"action":"upload","selector":"input[type=file]","paths":["C:/a.pdf"]}
+            #    （不给 selector 就全 frame 自动找第一个可见文件输入框）
+            # ② 按钮拦截：{"action":"upload","click_selector":"button#up","paths":[...]}
+            #    点"上传"按钮会弹系统选框——Playwright 没法操作 OS 对话框，
+            #    但 expect_file_chooser 能在弹窗前拦截住直接塞文件（主流上传模式）
+            raw = cmd.get("paths") or ([cmd.get("path")] if cmd.get("path") else [])
+            paths = [str(x) for x in raw if x]
+            if not paths:
+                return {"ok": False, "note": "upload 缺少 paths（本地文件路径数组）"}
+            missing = [p for p in paths if not Path(p).is_file()]
+            if missing:
+                return {"ok": False, "note": f"upload 文件不存在: {missing}"}
+            names = ", ".join(Path(p).name for p in paths)[:120]
+            sel = str(cmd.get("selector", "") or "").strip()
+            click_sel = str(cmd.get("click_selector", "") or "").strip()
+            el = how = None
+            # 招式优先级：显式 input selector > 显式 click_selector 拦截 > 全 frame 自动找
+            # （AI 显式点名的路必须先走，自动找只做兜底——此前自动找抢在拦截前面）
+            if sel:
+                el, how = _vision_find_el(page, {"selector": sel})
+                if el is None:
+                    return {"ok": False, "note": f"upload 定位失败: {how}"}
+                try:
+                    el.set_input_files(paths, timeout=5000)
+                    return {"ok": True, "note": f"已上传 {len(paths)} 个文件（{how}）: {names}"}
+                except Exception as exc:
+                    if not click_sel:
+                        return {"ok": False, "note": f"upload 失败: {str(exc)[:160]}"}
+                    el = None  # 直设失败且给了 click_selector：落到按钮拦截招
+            if el is None and click_sel:
+                btn, how = _vision_find_el(page, {"selector": click_sel})
+                if btn is None:
+                    return {"ok": False, "note": f"upload click_selector 定位失败: {how}"}
+                try:
+                    btn.wait_for(state="visible", timeout=3000)
+                    with page.expect_file_chooser(timeout=6000) as fc_info:
+                        center = _vision_el_center(page, btn)
+                        if center:
+                            human_click(page, center[0], center[1])
+                        else:
+                            btn.click(timeout=3000)
+                    fc_info.value.set_files(paths)
+                    return {"ok": True, "note": f"已借上传按钮拦截文件选择器，上传 {len(paths)} 个文件: {names}"}
+                except Exception as exc:
+                    if not sel:
+                        pass  # 拦截失败且没点名 input：落到最后的自动找兜底
+                    else:
+                        return {"ok": False, "note": f"upload 按钮拦截失败（站点可能用自家弹窗选文件）: {str(exc)[:140]}"}
+            if el is None:
+                # 自动找兜底：全 frame 找第一个可见文件输入框（含 iframe）
+                for fr in list(page.frames):
+                    try:
+                        cand = fr.locator("input[type=file]").first
+                        if cand.count() > 0 and cand.is_visible():
+                            el, how = cand, ("自动找到 input[type=file]"
+                                             + ("（iframe）" if fr is not page.main_frame else ""))
+                            break
+                    except Exception:
+                        continue
+                if el is not None:
+                    try:
+                        el.set_input_files(paths, timeout=5000)
+                        return {"ok": True, "note": f"已上传 {len(paths)} 个文件（{how}）: {names}"}
+                    except Exception as exc:
+                        return {"ok": False, "note": f"upload 失败: {str(exc)[:160]}"}
+            if el is None:
+                return {"ok": False, "note": "upload 没找到可用入口（无 input[type=file] 也未给 click_selector）"}
         elif act == "goto":
             target = str(cmd.get("url", ""))
             if not target:
@@ -507,6 +604,40 @@ def _vision_exec_action(page, cmd: Dict, output_dir: Path, prefix: str,
             # 元素标注：返回视口内所有可见可点元素（tag/text/中心坐标/尺寸）。
             # 视觉模型点按钮前先 elements 拿准坐标，不用从截图里猜像素
             els = page.evaluate(ELEMENTS_JS) or []
+            for e in els:
+                e["frame"] = 0
+            # v1.23.0：iframe 内容元素一并标注——子 frame 的 getBoundingClientRect
+            # 是 frame 内视口坐标，加上 <iframe> 本体在主视口的包围盒偏移换算成
+            # 主视口坐标（与坐标点击同基准，AI 拿到就能直接用）。
+            # 主 frame 元素排最前（原行为零变化），全量仍封顶 60 防刷屏。
+            try:
+                vw = page.viewport_size or {}
+            except Exception:
+                vw = {}
+            for fi, fr in enumerate(list(page.frames)[1:], start=1):
+                if len(els) >= 60:
+                    break
+                try:
+                    fe = fr.frame_element()
+                    box = fe.bounding_box() if fe else None
+                except Exception:
+                    continue
+                if not box:
+                    continue
+                try:
+                    sub = fr.evaluate(ELEMENTS_JS) or []
+                except Exception:
+                    continue
+                for e in sub:
+                    e["frame"] = fi
+                    e["frame_url"] = (fr.url or "")[:80]
+                    e["x"] = int(e["x"] + box["x"])
+                    e["y"] = int(e["y"] + box["y"])
+                    if vw and not (0 <= e["x"] <= vw.get("width", 1e9)
+                                   and 0 <= e["y"] <= vw.get("height", 1e9)):
+                        continue  # 换算后落在主视口外的不可点，丢弃
+                    els.append(e)
+            els = els[:60]
             return {"ok": True, "note": "", "elements": els}
         elif act == "tabs":
             # 标签页清单：点击开了新标签后用 tabs 看、switch_tab 切过去
@@ -627,7 +758,9 @@ def _vision_route(url: str, output_dir: Path, headed: bool = False, safe: bool =
          {"action":"type","text":"关键词"}             原模式：敲进当前焦点元素
          {"action":"press","key":"Enter"}              按键（精准输入后按回车提交）
          {"action":"focus","selector":"input[name=q]"} 按 CSS 选择器聚焦（输入前先 focus 比裸坐标点更可靠）
-         {"action":"elements"}                         元素标注：返回视口内全部可点元素（tag/text/中心坐标/尺寸），点按钮前先拿这个
+         {"action":"upload","selector":"input[type=file]","paths":["C:/a.pdf"]}  文件上传（不给 selector 就全 frame 自动找文件输入框；或给 "click_selector":"button#up" 拦截按钮触发的文件选择器）
+         {"action":"dialog","accept":true}             对话框策略（一次性）：下一个 confirm/prompt 接受；默认 dismiss 但每次都上报 dialog_events；prompt 可加 "prompt_text":"回复"
+         {"action":"elements"}                         元素标注：返回视口内全部可点元素（tag/text/中心坐标/尺寸，v1.23.0 起含 iframe 内容，坐标已换算主视口），点按钮前先拿这个
          {"action":"goto","url":"https://.."}          跳转 / back / forward / reload（启动 URL 失败会话也保活，可 goto 重试）
          {"action":"wait","ms":800}                    等待（等动画/懒加载）
          {"action":"screenshot"}                       主动重新截图
@@ -729,6 +862,7 @@ def _vision_route(url: str, output_dir: Path, headed: bool = False, safe: bool =
                         viewport={"width": viewport_w, "height": viewport_h},
                         locale="zh-CN", timezone_id="Asia/Shanghai",
                         ignore_https_errors=True,
+                        **_proxy_launch_kw(),
                         **({"service_workers": "block"} if safe else {}),
                     )
                 except Exception as exc:
@@ -738,7 +872,8 @@ def _vision_route(url: str, output_dir: Path, headed: bool = False, safe: bool =
             if context is None:
                 browser = p.chromium.launch(
                     headless=not headed,
-                    args=_browser_launch_args(safe) + ([f"--remote-debugging-port={debug_port}"] if debug_port else []))
+                    args=_browser_launch_args(safe) + ([f"--remote-debugging-port={debug_port}"] if debug_port else []),
+                    **_proxy_launch_kw())
                 context = browser.new_context(
                     user_agent=random.choice(USER_AGENTS),
                     # 视口默认 800×800 = DeepSeek 视觉原生分辨率（超范围会被官方压糊）；
@@ -760,6 +895,50 @@ def _vision_route(url: str, output_dir: Path, headed: bool = False, safe: bool =
                 page = context.pages[0] if (browser is None and context.pages) else context.new_page()
                 if safe:
                     _setup_safe_mode(context, page)
+                # ---- 对话框处理（v1.23.0）----
+                # 背景：Playwright 对未注册监听的对话框默认自动 dismiss——页面
+                # alert/confirm/prompt 不会卡死会话，但会被"静默取消"：AI 不知道
+                # 弹过框，点击触发的 confirm 流程永远走不通（等于全被取消）。
+                # 策略：记录并上报（dialog_events 进状态流），默认仍 dismiss
+                # （与原生行为一致，零破坏）；AI 预发 {"action":"dialog","accept":true}
+                # 设一次性策略后，下一个对话框才接受（prompt 可带回复文本）。
+                # 不能挂起等 AI 决定：渲染进程被模态阻塞时截图/evaluate 全挂死，
+                # 告知 AI 的那条状态永远发不出去（死锁）。
+                dialog_events: List[Dict] = []
+                dialog_policy = {"accept": False, "prompt_text": ""}
+
+                def _attach_dialog(pg):
+                    def _on_dialog(d):
+                        info = {"type": d.type, "message": (d.message or "")[:200],
+                                "default_value": d.default_value or ""}
+                        accept = d.type == "alert" or dialog_policy["accept"]
+                        reply = dialog_policy["prompt_text"] if accept else None
+                        dialog_policy["accept"] = False
+                        dialog_policy["prompt_text"] = ""
+                        info["handled"] = "accepted" if accept else "dismissed"
+                        if accept and d.type == "prompt" and reply:
+                            info["prompt_reply"] = reply
+                        try:
+                            if accept:
+                                d.accept(reply if d.type == "prompt" else None)
+                            else:
+                                d.dismiss()
+                        except Exception:
+                            pass
+                        dialog_events.append(info)
+                    try:
+                        pg.on("dialog", _on_dialog)
+                    except Exception:
+                        pass
+
+                def _drain_dialogs() -> Optional[Dict]:
+                    if not dialog_events:
+                        return None
+                    out = {"dialog_events": dialog_events[:5]}
+                    del dialog_events[:5]
+                    return out
+
+                _attach_dialog(page)
                 # 目录已有旧截图时提醒（自动清理有误删风险，只提示）
                 try:
                     old_shots = len(list(output_dir.glob("screen_*.png")))
@@ -828,6 +1007,7 @@ def _vision_route(url: str, output_dir: Path, headed: bool = False, safe: bool =
 
                 def _on_new_tab(np):
                     try:
+                        _attach_dialog(np)  # 新标签页的对话框同样要记录上报
                         new_tab_box.put(np)
                     except Exception:
                         pass
@@ -931,6 +1111,23 @@ def _vision_route(url: str, output_dir: Path, headed: bool = False, safe: bool =
                                                    if auto_interval_ms else "，自动截图关")),
                                     shoot=False)
                         continue
+                    if act == "dialog":
+                        # 对话框策略（v1.23.0）：预声明"下一个对话框怎么处理"（一次性）。
+                        # {"action":"dialog","accept":true}                    下一个 confirm/prompt 接受
+                        # {"action":"dialog","accept":true,"prompt_text":"hi"} prompt 接受并回复该文本
+                        # {"action":"dialog","accept":false}                   显式声明取消（默认行为）
+                        # 默认（未声明）仍是 dismiss + 上报——与 Playwright 原生一致
+                        dialog_policy["accept"] = bool(cmd.get("accept", True))
+                        dialog_policy["prompt_text"] = str(cmd.get("prompt_text", "") or "")
+                        _dlg_extra = {"ok": True}
+                        _d = _drain_dialogs()
+                        if _d:
+                            _dlg_extra.update(_d)
+                        _emit_state(page, note=("已设对话框策略：下一个将"
+                                                + ("接受" if dialog_policy["accept"] else "取消")
+                                                + ("（prompt 回复文本已设）" if dialog_policy["prompt_text"] else "（一次性，触发后失效）")),
+                                    shoot=False, extra=_dlg_extra)
+                        continue
                     # 新标签自动切换：上一步点击开了新标签（相关搜索/热搜类）→
                     # 切过去再执行本条指令，截图/操作都落在新标签上
                     try:
@@ -955,6 +1152,7 @@ def _vision_route(url: str, output_dir: Path, headed: bool = False, safe: bool =
                         # 这里直接重建空白页，会话保活（AI 重新 goto 即可）
                         try:
                             page = context.new_page()
+                            _attach_dialog(page)  # 重建页的对话框同样要记录上报
                             if safe:
                                 # 重建页要重挂弹窗拦截：context.route 还在，但 popup
                                 # 监听挂在旧 page 上，跟旧页一起丢了（修复安全模式缺口）
@@ -990,13 +1188,18 @@ def _vision_route(url: str, output_dir: Path, headed: bool = False, safe: bool =
                     if act in ("goto", "reload", "back", "forward"):
                         page.wait_for_timeout(800)
                     # elements 指令的元素清单带进状态（视觉模型直接读坐标点按钮）
-                    extra = {}
+                    extra = {"ok": r.get("ok", True)}  # v1.23.0：单步成败信号（AI 不用再猜 note）
                     if r.get("elements"):
                         extra["elements"] = r["elements"]
                     if r.get("tabs"):
                         extra["tabs"] = r["tabs"]
                     if "data" in r:
                         extra["eval_result"] = r["data"]  # eval 结构化结果
+                    # 对话框上报（v1.23.0）：本条指令期间页面弹过 alert/confirm/prompt
+                    # 的话，事件带 handled 结果进状态流（AI 由此知道 confirm 被取消/接受）
+                    _dlg = _drain_dialogs()
+                    if _dlg:
+                        extra.update(_dlg)
                     extra = extra or None
                     # 截图节奏：screenshot 指令强制拍；成功动作每 every 张拍一次；失败不拍
                     if act == "screenshot":

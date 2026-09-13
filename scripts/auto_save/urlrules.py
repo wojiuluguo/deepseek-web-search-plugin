@@ -325,20 +325,26 @@ def _cap_filename(name: str, max_stem: int = 80) -> str:
     return name[:max_stem + 7]
 
 
-def _resolve_share_redirect(url: str, timeout: float = 8.0) -> Optional[str]:
+def _resolve_share_redirect(url: str, timeout: float = 8.0,
+                            proxy: str = "") -> Optional[str]:
     """分享短链解析真实 URL（v1.22.1 修 note 转路盲区）：v.douyin.com/xhslink.com
     这类短链不含 /note/，调度器的 note 预判（子串检查）永远不触发，ytdlp 白撞
     "Unsupported URL"。HEAD 不跟跳读 Location，失败退 GET（只拿响应头不读体）。
-    拿不到返回 None，调用方按原 URL 走（浏览器路线自己会跟跳，不会更糟）。"""
+    拿不到返回 None，调用方按原 URL 走（浏览器路线自己会跟跳，不会更糟）。
+    proxy：全局代理（v1.23.0，--proxy 设置后由门面传入）。"""
     import urllib.request
 
     from .constants import USER_AGENTS
+    _opener = (urllib.request.build_opener(
+        urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
+        if proxy else None)
+    _open = _opener.open if _opener else urllib.request.urlopen
     for method in ("HEAD", "GET"):
         try:
             req = urllib.request.Request(
                 url, method=method,
                 headers={"User-Agent": USER_AGENTS[0]})
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
+            with _open(req, timeout=timeout) as resp:
                 final = resp.geturl()
                 if final and final != url:
                     return final

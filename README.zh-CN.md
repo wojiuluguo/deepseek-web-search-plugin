@@ -4,7 +4,7 @@
 
 OpenClaw Skill：让 DeepSeek 模型能搜索、会搜索、并且"该搜就搜"，还能自动下载网页里的视频/音频/图片/文件，多模态模型还能"看页面+操作页面"。
 
-> 当前版本 **v1.22.1**（2026-08-25）· 作者：user（抖音号: 94636651553）· [更新记录](#更新记录)
+> 当前版本 **v1.23.0**（2026-09-14）· 作者：user（抖音号: 94636651553）· [更新记录](#更新记录)
 
 <p align="center"><img src="assets/mascot.png" alt="deepseek-web-search 吉祥物" width="220"></p>
 
@@ -89,6 +89,12 @@ python scripts/auto_save_browser.py --url "..." --method harvest --media-type au
 python scripts/auto_save_browser.py --url "文件直链或页面" --json
 python scripts/auto_save_browser.py --url "https://.../downloads" --zip
 
+# yt-dlp 进阶（v1.23.0）：合集整单 / 转音频 / 清晰度封顶 / 全局代理
+python scripts/auto_save_browser.py --url "B站合集链接" --playlist --playlist-max 5 --json
+python scripts/auto_save_browser.py --url "https://..." --method ytdlp --extract-audio --audio-format mp3 --json
+python scripts/auto_save_browser.py --url "https://..." --method ytdlp --quality 720p --json
+python scripts/auto_save_browser.py --url "https://..." --proxy "http://127.0.0.1:7890" --json
+
 # 抓文章正文/小说章节（自动逐章合并 txt）
 python scripts/auto_save_browser.py --url "文章或目录页" --media-type text
 
@@ -114,7 +120,7 @@ python scripts/auto_save_browser.py --url "..." --method vision --model deepseek
 | 能力 | 用法 | 说明 |
 |---|---|---|
 | 页面截图 | 任意命令加 `--screenshot` | 打开页面→懒加载滚动→整页截图(PNG)+屏幕信息；超长页自动分段（官方单图最长边 8192px） |
-| 视觉会话 | `--method vision` | stdin 逐行发 JSON 指令（click/right_click/dblclick/move/scroll/type/press/goto/back/forward/reload/wait/screenshot/eval/quit），stdout 每步返回截图+屏幕状态 |
+| 视觉会话 | `--method vision` | stdin 逐行发 JSON 指令（click/right_click/dblclick/move/scroll/type/press/focus/**upload/dialog**/elements/tabs/switch_tab/goto/back/forward/reload/wait/screenshot/eval/viewport/shot_policy/quit），stdout 每步返回截图+屏幕状态；v1.23.0 起支持**文件上传、对话框接受策略、iframe 内元素** |
 | 屏幕信息 | 每步自动输出 | 视口尺寸、整页尺寸、DPR、鼠标坐标、滚动位置——模型据此算点击坐标 |
 | 模型检测 | `--model <模型名>` | 名称含 vision = 多模态，输出 `vision_capable` + `api_hint`（官方 API 参数，照抄拼请求） |
 | 成本防护 | `--max-screenshots`（默认 30）/ `--shot-detail low` | 每张截图 ≤384 token（官方封顶），超限自动停截图；low=512×512 省钱模式 |
@@ -135,7 +141,8 @@ direct → ytdlp → browser → cache → harvest → text   （带了 cookie �
 | SPA 懒加载图集（小黑盒等） | 迭代滚动收割：逐段滚→等新图挂载→收割本轮→循环到无新增（≤30 轮、200 张封顶）；跨域 CDN 图被 CORS 拦时自动降级脚本直连 |
 | 登录墙（抖音/B站） | `--cookies <文件>`（Netscape cookies.txt，"Get cookies.txt" 扩展导出）或 `--cookies-from-browser chrome/edge/firefox`（直接读本机浏览器登录态）——yt-dlp、浏览器、cache、harvest 全路线生效 |
 | 抖音图文帖（`/note/`） | 自动转 harvest 收割图集原图（yt-dlp 不支持 note URL），输出 `note_auto_rerouted: true` |
-| 文件页 | 直链流式下载（8MB 分块）；文件夹页自动收集 ≤50 个文件链接批量下；文件名取 Content-Disposition 还原中文名 |
+| 文件页 | 直链流式下载（8MB 分块）；文件夹页自动收集 ≤50 个文件链接批量下；文件名取 Content-Disposition 还原中文名；v1.23.0 起 **.part 断点续传**（中断后续传、成品幂等复用、完整才转正） |
+| 代理 / 台账（v1.23.0） | `--proxy` 全链穿透（Chromium/urllib 直连/yt-dlp/短链解析）；`.manifest.jsonl` 下载台账逐行记录 url→文件（跨运行可追溯） |
 | 点击下载跳 APP | `--click-download` 五级降级链：按钮直链/scheme 解码 → 点击+网络嗅探（含新标签页）→ 原生下载事件 → 手机 UA 伪装 → 页面上下文 fetch |
 | APP 引流陷阱 | 全部"下载链接"都是应用商店时输出 `app_only: true`，如实报告不硬造 |
 | 跳转壳页 | HTTP 3xx + JS 参数跳转双重解壳，主动穿透（≤3 跳） |
@@ -227,6 +234,16 @@ deepseek-web-search-plugin/
 - **费用提醒**：视觉模式（`--method vision` 无头浏览器会话）按截图付费，消费金额较大，一般用户不推荐使用；搜索/下载/抓正文等其他路线全部免费
 
 ## 更新记录
+
+### v1.23.0（2026-09-14）
+
+能力补强版：yt-dlp 三开关 + 视觉会话三件套 + 下载链代理/续传/台账 + 项目史上第一个正式测试目录。全部默认行为零变化（新能力全部 opt-in）。
+
+- **yt-dlp 三开关**：`--playlist` / `--playlist-max N`（合集/播放列表整单，此前写死 noplaylist 只能下单条——单视频语义保留为默认）；`--extract-audio --audio-format mp3|m4a|...`（只拉音轨省一半流量，ffmpeg 转码）；`--quality best|1080p|720p|480p|360p`（清晰度封顶）。实测踩坑两连：format 回退链末端必须兜 `bestvideo+bestaudio`（B站等纯 DASH 站没有渐进单文件，`best` 永远落空）；竖屏视频"高度"是长边（480P 档=480x852），补 `width<=N` 招才命中同名清晰度档。
+- **视觉会话三件套**：① **对话框**——此前 Playwright 默认静默取消 alert/confirm/prompt，AI 不知道弹过框、confirm 流程永远走不通；现在每次上报 `dialog_events`（默认仍取消，零破坏），`{"action":"dialog","accept":true}` 设一次性接受策略（prompt 可带回复文本）。② **文件上传**——`upload` 指令三招：显式 selector 直设 > `click_selector` 拦截系统选框（expect_file_chooser，主流上传模式）> 全 frame 自动找 input[type=file]。③ **iframe**——elements 跨 frame 标注（子 frame 坐标加 iframe 包围盒偏移换算到主视口，`frame` 字段标来源）；selector/text 主 frame 找不到自动逐 frame 定位（child frame 的 bounding_box 官方语义就是主视口基准，坐标点击无需换算）。
+- **下载链三补**：① `--proxy` 全链穿透（Chromium launch 持久化/一次性两路、urllib 直连三处、yt-dlp、分享短链解析——此前下载核心完全没有代理能力）；② **断点续传**——文件下载改写 `.part` + `Range: bytes=N-`，中断后续传（2GB 下到 90% 断掉不再从头来），完整 EOF 才转正（修复"半截文件顶着成品名留盘"），服务器不支持 Range 或成品已存在各有如实处置；③ **下载台账**——`.manifest.jsonl` 逐行记录 url→文件/大小/md5（<8MB 才算），跨运行可追溯。
+- **tests/（项目首个正式测试目录）**：`python tests/run_all.py` 一键跑，纯 stdlib 零新依赖，3 文件 28 项——yt-dlp 开关字典形态、断点续传/代理生效（本地 HTTP 服务器自建 Range 支持 + 死端口代理必炸法）、台账字段、vision 指令注册。
+- **实测验证**：B站 `--quality 480p`（13.4MB 成品）/ `--extract-audio mp3`（2.2MB）端到端；`--playlist` 单视频回归仍只下 1 条；vision 三件套本地 HTML 测试页 e2e 12/12（iframe 元素标注/iframe 内点击/confirm 上报与接受/dismiss 语义断言/upload 双招/文件名回读）。
 
 ### v1.22.1（2026-08-25）
 

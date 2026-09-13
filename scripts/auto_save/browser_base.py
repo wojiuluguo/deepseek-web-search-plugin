@@ -8,6 +8,7 @@ import random
 import sys
 import tempfile
 import time
+import urllib.request
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -19,7 +20,42 @@ from .urlrules import _safe_filename, _safe_request_reason
 __all__ = [
     "_setup_safe_mode", "_browser_launch_args", "_apply_stealth", "_save_bytes",
     "_wait_for_render", "_open_page",
+    "set_proxy", "get_proxy", "_proxy_urlopen",
 ]
+
+# ---- 代理（v1.23.0）：模块级状态，全链一处设置处处生效 ----
+# 沿用 humanize/realheadless/ytdlp_opts 的行为开关模式：--proxy 解析后 set_proxy()
+# 落一次，浏览器路线（_open_page）、urllib 直连（routes 三处）、yt-dlp（ydl_opts）
+# 全部读取同一状态。默认空 = 直连（旧行为零变化）。下载核心此前完全没有代理能力
+# （search_browser 有 --proxy 但 auto_save 没有），海外/受限网络场景无退路。
+_PROXY = {"server": ""}
+
+
+def set_proxy(server: str) -> str:
+    """设置全局代理（http://host:port 或 socks5://...，空串=清除）。返回生效值。"""
+    _PROXY["server"] = (server or "").strip()
+    return _PROXY["server"]
+
+
+def get_proxy() -> str:
+    return _PROXY["server"]
+
+
+def _proxy_urlopen(req, timeout: float):
+    """带代理状态的 urlopen：未设代理时等价原生 urlopen；设了就走显式
+    ProxyHandler（urllib 默认只认环境变量，显式代理必须自建 opener）。"""
+    server = _PROXY["server"]
+    if not server:
+        return urllib.request.urlopen(req, timeout=timeout)
+    opener = urllib.request.build_opener(
+        urllib.request.ProxyHandler({"http": server, "https": server}))
+    return opener.open(req, timeout=timeout)
+
+
+def _proxy_launch_kw() -> Dict:
+    """launch 级 proxy kwargs（Chromium launch/launch_persistent_context 都吃）。"""
+    server = _PROXY["server"]
+    return {"proxy": {"server": server}} if server else {}
 
 
 def _setup_safe_mode(context, page) -> Dict[str, int]:
@@ -175,13 +211,14 @@ def _launch_chromium(p, headless: bool, args, **kw):
     last_exc = None
     for ch in order:
         try:
-            b = p.chromium.launch(channel=ch, headless=headless, args=args, **kw)
+            b = p.chromium.launch(channel=ch, headless=headless, args=args,
+                                  **_proxy_launch_kw(), **kw)
             _LAUNCH_CHANNEL["v"] = ch
             return b
         except Exception as exc:
             last_exc = exc
     try:
-        b = p.chromium.launch(headless=headless, args=args, **kw)
+        b = p.chromium.launch(headless=headless, args=args, **_proxy_launch_kw())
         _LAUNCH_CHANNEL["v"] = "shell"
         return b
     except Exception:
@@ -205,14 +242,16 @@ def _launch_chromium_persistent(p, user_data_dir: str, headless: bool, args, **k
     for ch in order:
         try:
             ctx = p.chromium.launch_persistent_context(
-                channel=ch, user_data_dir=user_data_dir, headless=headless, args=args, **kw)
+                channel=ch, user_data_dir=user_data_dir, headless=headless, args=args,
+                **_proxy_launch_kw(), **kw)
             _LAUNCH_CHANNEL["v"] = ch
             return ctx
         except Exception as exc:
             last_exc = exc
     try:
         ctx = p.chromium.launch_persistent_context(
-            user_data_dir=user_data_dir, headless=headless, args=args, **kw)
+            user_data_dir=user_data_dir, headless=headless, args=args,
+            **_proxy_launch_kw())
         _LAUNCH_CHANNEL["v"] = "shell"
         return ctx
     except Exception:

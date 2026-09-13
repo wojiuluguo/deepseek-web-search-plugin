@@ -1,8 +1,8 @@
 ---
 name: deepseek-web-search
 description: DeepSeek 联网搜索技能。遇到实时信息、事实核查、新闻、价格、代码报错、未知名词或用户说“搜一下”时，必须使用本技能搜索并附来源。
-version: 1.22.1
-updated: 2026-08-25
+version: 1.23.0
+updated: 2026-09-14
 author: user（抖音号: 94636651553）
 license: MIT
 tags: [web, search, deepseek, 联网, 搜索]
@@ -105,7 +105,9 @@ tags: [web, search, deepseek, 联网, 搜索]
 {"action":"type","text":"搜索词"}       // 原模式：敲进当前焦点元素
 {"action":"press","key":"Enter"}
 {"action":"focus","selector":"input[name=q]"}
-{"action":"elements"}
+{"action":"upload","selector":"input[type=file]","paths":["C:/a.pdf"]}  // 文件上传（不给 selector 就全 frame 自动找文件输入框；或 "click_selector":"button#up" 拦截按钮触发的系统选框）
+{"action":"dialog","accept":true}      // 对话框策略（一次性）：下一个 confirm/prompt 接受；prompt 可加 "prompt_text":"回复文本"。默认 dismiss 但每次都上报 dialog_events
+{"action":"elements"}                  // v1.23.0 起含 iframe 内容元素（坐标已换算主视口，frame 字段标来源）
 {"action":"tabs"}                      // 标签页清单（点击开了新标签后查）
 {"action":"switch_tab","index":1}      // 切到指定标签（配合 tabs 用）
 {"action":"goto","url":"https://..."}
@@ -127,7 +129,9 @@ tags: [web, search, deepseek, 联网, 搜索]
 
 **中文输入备忘**：视觉会话原 `type`（纯坐标聚焦）对中文可能输出 `???`；**v1.15.0 起用精准输入 `{"action":"type","selector":"...","text":"中文"}`**——键盘通道失败自动 JS 设值兜底，中文可靠；纯 HTTP 搜索中文关键词建议直接走 `search.py`（不出输入法问题）。
 
-**每步输出状态**：`screenshot`（最新截图路径）+ `screen`（视口尺寸/整页尺寸/DPR/鼠标位置/滚动位置/当前焦点元素 active_element——你据此判断坐标和 Tab 导航结果）+ `screenshots_used/max`（成本计数）+ `api_hint`（官方 API 参数照抄即可拼请求：base64 内联、detail 等级、384 token 封顶）。失败指令（缺 x/y、缺 text、坏 JSON）只回错误 note 不消耗截图配额——页面没变不用重拍。`eval` 的结构化结果放 `eval_result` 字段（note 里是文本版）。启动 URL 打不开时**会话保活**（note 提示 startup url failed），直接发 `goto` 指令换 URL 即可，不用重开会话。页面发生跳转时初始状态带 `redirected_from` 告警。
+**每步输出状态**：`screenshot`（最新截图路径）+ `screen`（视口尺寸/整页尺寸/DPR/鼠标位置/滚动位置/当前焦点元素 active_element——你据此判断坐标和 Tab 导航结果）+ `ok`（本条指令成败信号，v1.23.0 起不用再猜 note）+ `screenshots_used/max`（成本计数）+ `api_hint`（官方 API 参数照抄即可拼请求：base64 内联、detail 等级、384 token 封顶）。失败指令（缺 x/y、缺 text、坏 JSON）只回错误 note 不消耗截图配额——页面没变不用重拍。`eval` 的结构化结果放 `eval_result` 字段（note 里是文本版）。启动 URL 打不开时**会话保活**（note 提示 startup url failed），直接发 `goto` 指令换 URL 即可，不用重开会话。页面发生跳转时初始状态带 `redirected_from` 告警。
+
+**对话框与文件上传（v1.23.0）**：页面弹 `alert/confirm/prompt` 时默认取消（与 Playwright 原生一致）但**每次都上报 `dialog_events`**（type/message/handled）——此前被静默取消，AI 根本不知道弹过框、confirm 流程永远走不通；要"确定"类流程通过，先发 `{"action":"dialog","accept":true}`（一次性策略）再触发。文件上传两招：页面有文件输入框就 `{"action":"upload","selector":"input[type=file]","paths":[...]}`（不给 selector 全 frame 自动找）；"点按钮弹系统选框"的主流模式用 `{"action":"upload","click_selector":"按钮选择器","paths":[...]}`（拦截文件选择器直接塞文件）。iframe 内的按钮/输入框现在也定位得到（selector/text 主 frame 找不到自动逐 frame 找，note 注明来源）。
 
 **虚拟鼠标指针（v1.20.0 三形态，视觉会话自带）**：无头截图不渲染系统光标——会话自动注入一个**放大的指针（34px，白底黑描边，任何底色都看得清）**，实时跟随鼠标且**跟真鼠标一样变形**：悬停链接/按钮→**手指**、悬停输入框→**I 型文本光标**、其他→**箭头**（每步检测鼠标下元素的 CSS cursor 自动切换）。AI 看截图不仅知道"鼠标在哪"，还知道"现在悬停的东西能不能点/能不能输入"。
 
@@ -443,6 +447,7 @@ python "{baseDir}/scripts/search_browser.py" --query "transformer" --category ac
 - **开发助手**：代码由 **智谱 5.3**（GLM）编写与维护
 - **测试 AI**：视觉会话等能力由 **MiniMax M3** 与 **DeepSeek 多模态模型**（deepseek-v4-flash-vision-exp）两个模型交叉实测
 - **代码结构（v1.22.0 全量模块化）**：三大门面 + 双包架构——`auto_save_browser.py`（824 行）拆出 `scripts/auto_save/` 包（constants/ffmpeg/cookies/urlrules/browser_base/humanize/realheadless/shots/vision/routing/routes 共 12 模块，四条路线的浏览器启动样板归一为 `browser_base._open_page()`）；`search.py`（124 行）+ `search_browser.py`（148 行）拆出 `scripts/searchkit/` 包（http/normalize/adfilter/dispatch/runner/browser + engines/ 五类 20 引擎 + engines_browser/ 五类 14 浏览器引擎），轻量版与浏览器版共用一套分类表（双表已消灭）；smart/cross/own 三调度器共用 `searchkit/runner.py` 执行件。门面仍是唯一命令行入口，外部 import 路径零变化，全部批次经 AST 逐节点比对 + 运行时验收确认零逻辑改动
+- **回归测试（v1.23.0 起）**：`python tests/run_all.py` 一键跑（纯 stdlib 零新依赖）——yt-dlp 三开关字典形态、断点续传/代理生效（本地 HTTP 服务器自建 Range）、下载台账、vision 指令注册；改动这三个模块后必须全绿再提交
 - 详见项目文章 [ARTICLE.md](ARTICLE.md)
 
 ## 失败兜底

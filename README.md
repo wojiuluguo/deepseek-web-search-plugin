@@ -4,7 +4,7 @@ English | **[中文](README.zh-CN.md)**
 
 An [OpenClaw](https://github.com/openclaw) skill that gives DeepSeek real web search **and** an auto-save browser that downloads videos/audio/images/files from any webpage it opens — plus a vision mode for multimodal models (see a page, operate a page).
 
-> Current version **v1.22.1** (2026-08-25) · Author: user (Douyin ID: 94636651553) · [Changelog](#changelog)
+> Current version **v1.23.0** (2026-09-14) · Author: user (Douyin ID: 94636651553) · [Changelog](#changelog)
 
 <p align="center"><img src="assets/mascot.png" alt="deepseek-web-search mascot" width="220"></p>
 
@@ -87,6 +87,12 @@ python scripts/auto_save_browser.py --url "..." --method harvest --media-type au
 python scripts/auto_save_browser.py --url "direct file link or page" --json
 python scripts/auto_save_browser.py --url "https://.../downloads" --zip
 
+# yt-dlp extras (v1.23.0): full playlists / extract audio / quality cap / global proxy
+python scripts/auto_save_browser.py --url "Bilibili collection URL" --playlist --playlist-max 5 --json
+python scripts/auto_save_browser.py --url "https://..." --method ytdlp --extract-audio --audio-format mp3 --json
+python scripts/auto_save_browser.py --url "https://..." --method ytdlp --quality 720p --json
+python scripts/auto_save_browser.py --url "https://..." --proxy "http://127.0.0.1:7890" --json
+
 # Extract article text / novel chapters (auto-merges chapters into one txt)
 python scripts/auto_save_browser.py --url "article or chapter-index page" --media-type text
 
@@ -112,7 +118,7 @@ Adapts the official `deepseek-v4-flash-vision-exp` multimodal model (released 20
 | Capability | Usage | Description |
 |---|---|---|
 | Page screenshots | Add `--screenshot` to any command | Opens page → lazy-load scroll → full-page PNG + screen info; ultra-tall pages auto-segmented (official max edge 8192px) |
-| Vision session | `--method vision` | Send JSON commands line-by-line via stdin (click/right_click/dblclick/move/scroll/type/press/goto/back/forward/reload/wait/screenshot/eval/quit); each step returns a screenshot + screen state on stdout |
+| Vision session | `--method vision` | Send JSON commands line-by-line via stdin (click/right_click/dblclick/move/scroll/type/press/focus/**upload/dialog**/elements/tabs/switch_tab/goto/back/forward/reload/wait/screenshot/eval/viewport/shot_policy/quit); each step returns a screenshot + screen state on stdout; v1.23.0 adds **file upload, dialog accept policy, and iframe elements** |
 | Screen info | Auto-output each step | Viewport size, full-page size, DPR, mouse coordinates, scroll position — the model computes click coordinates from these |
 | Model detection | `--model <name>` | Name contains "vision" = multimodal; outputs `vision_capable` + `api_hint` (official API params, copy-paste into requests) |
 | Cost guard | `--max-screenshots` (default 30) / `--shot-detail low` | Each screenshot ≤384 tokens (official cap); auto-stops when limit hit; low = 512×512 budget mode |
@@ -133,7 +139,8 @@ direct → ytdlp → browser → cache → harvest → text   (+ ytdlp-with-cook
 | Lazy-loaded SPA galleries (Xiaoheihe etc.) | Iterative scroll-harvest: scroll a step → wait for new images to mount → harvest the batch → repeat until no new items (≤30 rounds, 200-file cap); cross-origin CDN images fall back to direct HTTP download when in-page fetch is CORS-blocked |
 | Login walls (Douyin/Bilibili) | `--cookies <file>` (Netscape cookies.txt, exported via "Get cookies.txt" extension) or `--cookies-from-browser chrome/edge/firefox` — injected into yt-dlp, browser contexts, cache & harvest routes alike |
 | Douyin photo posts (`/note/`) | Auto-rerouted to `harvest` (yt-dlp doesn't support note URLs); output `note_auto_rerouted: true` |
-| File pages | Streaming direct download (8MB chunks); folder pages auto-collect ≤50 file links for batch download; filenames restored from Content-Disposition (CJK-safe) |
+| File pages | Streaming direct download (8MB chunks); folder pages auto-collect ≤50 file links for batch download; filenames restored from Content-Disposition (CJK-safe); v1.23.0 adds **.part resumable downloads** (resume after interruption, idempotent reuse of finished files, rename only on complete EOF) |
+| Proxy / manifest (v1.23.0) | `--proxy` plumbing through every exit path (Chromium launch, raw urllib, yt-dlp, share-link resolution); `.manifest.jsonl` ledger records url→file line by line (traceable across runs) |
 | "Click to download" → app redirect | `--click-download` 5-level fallback chain: button direct links/scheme decoding → programmatic click + network sniffing (incl. new tabs) → native download events → mobile UA spoofing → page-context fetch |
 | App-store funnels | If every "download link" points to an app store, outputs `app_only: true` — honest reporting, no fake results |
 | Redirect shells | Dual unwrapping: HTTP 3xx + JS parameter redirects, active piercing (≤3 hops) |
@@ -225,6 +232,16 @@ deepseek-web-search-plugin/
 - **Cost note**: Vision mode (`--method vision`, headless browser session) is billed per screenshot and costs a nontrivial amount — not recommended for general users; all other routes (search/download/text) are completely free
 
 ## Changelog
+
+### v1.23.0 (2026-09-14)
+
+Capability release: yt-dlp switches + vision-session trio + download-chain proxy/resume/ledger + the project's first real test suite. Zero default-behavior changes (everything is opt-in).
+
+- **yt-dlp switches**: `--playlist` / `--playlist-max N` (download full collections — noplaylist was hardcoded; single-video semantics stay the default); `--extract-audio --audio-format mp3|m4a|...` (audio-only stream saves half the traffic, ffmpeg transcodes); `--quality best|1080p|720p|480p|360p` (resolution cap). Two live-test lessons: the format fallback chain must end in `bestvideo+bestaudio` (DASH-only sites like Bilibili have no progressive single file, so bare `best` never matches); portrait videos' "height" is the long edge (their 480P tier is 480x852), so a `width<=N` alternative is required to hit the same-named tier.
+- **Vision-session trio**: ① **Dialogs** — Playwright silently auto-dismisses alert/confirm/prompt by default; the AI never knew a dialog appeared and confirm-based flows were unreachable. Now every dialog is reported via `dialog_events` (still dismissed by default — zero breakage), and `{"action":"dialog","accept":true}` sets a one-shot accept policy (prompt can carry reply text). ② **File upload** — the `upload` command with a 3-step ladder: explicit input selector direct-set > `click_selector` file-chooser interception (expect_file_chooser, the mainstream upload pattern) > auto-find input[type=file] across all frames. ③ **iframes** — elements now annotate cross-frame (child-frame coordinates offset by the iframe's bounding box into main-viewport space, `frame` field marks the source); selector/text locators fall back frame-by-frame when the main frame misses (child-frame bounding_box is officially main-viewport-relative, so coordinate clicks need no conversion).
+- **Download-chain additions**: ① `--proxy` plumbed through every exit path (Chromium launch both persistent and one-shot, three raw-urllib sites, yt-dlp, share-link resolution — the download core previously had no proxy support at all); ② **resumable downloads** — files now write to `.part` + `Range: bytes=N-`, resuming after interruption (a 2GB file cut at 90% no longer restarts), renaming only on complete EOF (fixes half-files wearing finished names), with honest handling for no-Range servers and already-cached files; ③ **download ledger** — `.manifest.jsonl` records url→file/size/md5 (<8MB) line by line, traceable across runs.
+- **tests/ (the project's first real test directory)**: `python tests/run_all.py` runs everything, pure stdlib with zero new dependencies, 3 files / 28 checks — ytdlp option dict shapes, resume + proxy effectiveness (a local HTTP server with hand-built Range support + a dead-port proxy-must-fail probe), ledger fields, vision command registration.
+- **Verified live**: Bilibili `--quality 480p` (13.4MB product) and `--extract-audio mp3` (2.2MB) end to end; `--playlist` on a single video still downloads exactly 1; vision trio 12/12 on a local HTML test page (iframe element annotation, in-iframe click, confirm report + accept, dismiss semantics assertion, both upload moves, filename readback).
 
 ### v1.22.1 (2026-08-25)
 

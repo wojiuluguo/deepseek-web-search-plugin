@@ -86,6 +86,7 @@ from auto_save.urlrules import (
 # _browser_launch_args/_apply_stealth 内部挂钩 --real-headless 拟真（与 --stealth 正交）。
 from auto_save.browser_base import (
     _setup_safe_mode, _browser_launch_args, _apply_stealth, _save_bytes,
+    set_proxy, get_proxy, _proxy_urlopen, _proxy_launch_kw,
 )
 # ---- 新增（v1.22.0）：拟人输入 + 无头拟真 ----
 # humanize：行为层拟真（贝塞尔轨迹/微偏移按压/正态键间隔/分步滚动），--humanize on|off
@@ -99,6 +100,7 @@ from auto_save import realheadless
 # 调度器 auto_save_url 本体留在本文件（chain 递归+分派薄壳），全部零逻辑改动。
 from auto_save.routes import (
     HARVEST_JS, FILE_LINKS_JS, CHAPTER_LINKS_JS,
+    set_ytdlp_opts,
     _download_direct, _download_with_ytdlp, _http_fetch_media, _page_fetch,
     _file_direct_download, _goto_pierce_shell, _trigger_lazy_media,
     _auto_play_videos, _wait_images_complete, _extract_body_text,
@@ -209,7 +211,7 @@ def auto_save_url(
     try:
         _sl_host = urllib.parse.urlparse(url).netloc.lower()
         if any(_host_matches(_sl_host, d) for d in SHARE_SHORTLINK_HOSTS):
-            resolved = _resolve_share_redirect(url)
+            resolved = _resolve_share_redirect(url, proxy=get_proxy())
             if resolved:
                 effective_url = _decode_redirect_url(resolved) or resolved
                 sys.stderr.write(f"[note] 短链解析: {url[:60]} → {effective_url[:100]}\n")
@@ -512,6 +514,45 @@ def _format_plain(data: Dict) -> str:
     return "\n".join(lines)
 
 
+def _append_manifest(output_dir: Path, data: Dict) -> None:
+    """下载台账（v1.23.0）：每次成功落盘的 url→文件 映射追加到
+    <output_dir>/.manifest.jsonl（一行一条 JSON）。此前产物用时间戳命名且
+    "哪个 URL 下到了哪个文件"只活在单次运行里——跨运行无法追溯、同 URL
+    重复下载无从判断。md5 只对小文件算（大文件全量读一遍代价不值）。
+    台账失败静默（记录绝不影响下载本身）。"""
+    saved = data.get("saved") or []
+    if not saved:
+        return
+    try:
+        lines = []
+        ts = time.strftime("%Y-%m-%d %H:%M:%S")
+        for i in saved:
+            p = i.get("path", "")
+            try:
+                sz = int(i.get("size") or (os.path.getsize(p) if p and os.path.exists(p) else 0))
+            except OSError:
+                sz = 0
+            md5 = ""
+            try:
+                if p and os.path.exists(p) and 0 < sz <= 8 * 1024 * 1024:
+                    md5 = hashlib.md5(Path(p).read_bytes()).hexdigest()
+            except Exception:
+                md5 = ""
+            lines.append(json.dumps({
+                "time": ts,
+                "url": i.get("url", ""),
+                "path": p,
+                "size": sz,
+                "kind": i.get("kind", ""),
+                "quality": data.get("quality", ""),
+                **({"md5": md5} if md5 else {}),
+            }, ensure_ascii=False))
+        with open(output_dir / ".manifest.jsonl", "a", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+    except Exception:
+        pass
+
+
 def main(argv=None):
     # 输出编码说明（v1.22.0 压测后修正）：Windows 中文环境下 Python 管道输出默认用
     # locale 编码（GBK），与常见终端/重定向查看端一致——保持默认即可正确显示。
@@ -595,6 +636,38 @@ def main(argv=None):
         help="text 路线专用：小说/长文目录页最多抓多少章合并（默认 100）",
     )
     parser.add_argument("--headed", action="store_true", help="显示浏览器窗口（默认无头）")
+    # ---- yt-dlp 能力开关（v1.23.0，全部 opt-in，默认关闭 = 旧行为）----
+    parser.add_argument(
+        "--playlist",
+        action="store_true",
+        help="yt-dlp 下载合集/播放列表整单（默认只下当前这一条——单视频语义是刻意设计）。"
+             "配 --playlist-max 限制个数；产物按 标题[视频id] 逐个落盘",
+    )
+    parser.add_argument(
+        "--playlist-max",
+        type=int,
+        default=0,
+        metavar="N",
+        help="配 --playlist 用：最多下前 N 个（默认 0=整个列表全下）",
+    )
+    parser.add_argument(
+        "--extract-audio",
+        action="store_true",
+        help="下载后用 ffmpeg 抽成纯音频（只拉音轨省一半流量），产物 .mp3 等音频文件；"
+             "需要 ffmpeg（未装会 stderr 告警且转码失败）",
+    )
+    parser.add_argument(
+        "--audio-format",
+        choices=["mp3", "m4a", "aac", "wav", "flac", "opus"],
+        default="mp3",
+        help="配 --extract-audio 用：转码目标格式（默认 mp3）",
+    )
+    parser.add_argument(
+        "--quality",
+        choices=["best", "1080p", "720p", "480p", "360p"],
+        default="best",
+        help="yt-dlp 视频清晰度上限（默认 best=最高）。Np=高度封顶，源站无该档自动回退最高可用",
+    )
     parser.add_argument(
         "--safe",
         action="store_true",
@@ -638,6 +711,14 @@ def main(argv=None):
         help="视觉会话结束后不立即关浏览器：--headed 窗口保留给人看完手动关（上限1h）；无头保留 30s 自动退。AI 脚本崩了浏览器现场不再消失",
     )
     parser.add_argument(
+        "--proxy",
+        default="",
+        metavar="URL",
+        help="全局代理（v1.23.0）：http://host:port 或 socks5://host:port，覆盖本命令的全部出口——"
+             "浏览器路线（Chromium launch）、urllib 直连（媒体整取/文件下载/短链解析）、yt-dlp。"
+             "默认空=直连",
+    )
+    parser.add_argument(
         "--stealth",
         choices=["full", "basic", "off"],
         default="full",
@@ -667,6 +748,15 @@ def main(argv=None):
     # ---- v1.22.0 行为开关落到模块级（避免参数层层穿透各路线）----
     set_humanize(args.humanize == "on")
     realheadless.set_enabled(args.real_headless == "on")
+    # v1.23.0：全局代理（浏览器路线/urllib 直连/yt-dlp 三处共用一个状态）
+    set_proxy(args.proxy)
+    # v1.23.0：yt-dlp 能力开关（播放列表/转音频/清晰度）同样落模块级，
+    # 默认全关 = 与 v1.22.1 行为逐字节一致（noplaylist 单视频语义保留）
+    set_ytdlp_opts(playlist=args.playlist,
+                   playlist_max=args.playlist_max,
+                   extract_audio=args.extract_audio,
+                   audio_format=args.audio_format,
+                   quality=args.quality)
 
     if not args.url and not args.query:
         parser.print_help()
@@ -907,6 +997,11 @@ def main(argv=None):
                 data["quality"] = _assess_saved_quality(data["saved"], _kinds)
         else:
             data["quality"] = "empty"
+
+    # 下载台账（v1.23.0）：成功落盘的产物记入 .manifest.jsonl（vision 是会话
+    # 协议没有 saved 产物，不记）
+    if args.method != "vision":
+        _append_manifest(output_dir, data)
 
     if args.json:
         # default=str 兜底（v1.22.1 排雷）：产物 dict 里混进任何非 JSON 类型

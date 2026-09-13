@@ -1,6 +1,6 @@
 {
   "name": "deepseek-web-search",
-  "version": "1.22.1",
+  "version": "1.23.0",
   "description": "DeepSeek 联网搜索技能：Playwright 真实浏览器模拟 + 轻量多引擎搜索 + 自动保存型浏览器下载、免 API Key、强制引用来源。",
   "main": "scripts/search.py",
   "scripts": {
@@ -12,7 +12,8 @@
     "test:crosssearch": "python scripts/cross_search.py --help",
     "test:smartsearch": "python scripts/smart_search.py --help",
     "test:searchcache": "python scripts/search_and_cache.py --help",
-    "test:verify": "python scripts/verify_capture.py --help"
+    "test:verify": "python scripts/verify_capture.py --help",
+    "test:suite": "python tests/run_all.py"
   },
   "keywords": [
     "openclaw",

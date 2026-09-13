@@ -13,6 +13,7 @@ import re
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
@@ -22,6 +23,7 @@ from typing import Dict, List, Optional, Tuple
 from .browser_base import (
     _open_page, _save_bytes, _wait_for_render,
     _apply_stealth, _browser_launch_args, _launch_chromium,
+    get_proxy, _proxy_urlopen,
 )
 from .constants import AUDIO_EXTS, FILE_EXTS, SAFE_MAX_FILE_BYTES, USER_AGENTS, VIDEO_EXTS
 from .ffmpeg import (_decoded_duration, _ffmpeg_path, _ffprobe_info, _ffprobe_path,
@@ -38,6 +40,7 @@ from .urlrules import (CLICK_DOWNLOAD_FILE_TYPES, DOWNLOAD_BUTTON_TEXTS,
 
 __all__ = [
     "HARVEST_JS", "FILE_LINKS_JS", "CHAPTER_LINKS_JS",
+    "set_ytdlp_opts", "_build_ydl_opts", "_ytdlp_format",
     "_download_direct", "_download_with_ytdlp", "_http_fetch_media", "_page_fetch",
     "_file_direct_download", "_goto_pierce_shell", "_trigger_lazy_media",
     "_auto_play_videos", "_wait_images_complete", "_extract_body_text",
@@ -136,6 +139,97 @@ CHAPTER_LINKS_JS = """
 }
 """
 
+# ---- yt-dlp 能力开关（v1.23.0）：播放列表 / 转音频 / 清晰度 ----
+# 沿用 v1.22.0 行为开关模式（humanize/realheadless 先例）：落到模块级状态，
+# 避免新参数层层穿透 auto_save_url（已有 25+ 形参）和 5 处调用点。
+# 默认全部维持旧行为——noplaylist 单视频语义是刻意设计（用户给一条链接就只下
+# 这一条），不改动；三个能力全部 opt-in（--playlist / --extract-audio / --quality）。
+_YTDLP_OPTS = {
+    "playlist": False,       # True = 合集/播放列表整单下载（--playlist）
+    "playlist_max": 0,       # >0 = 最多下前 N 个（--playlist-max，映射 playlistend）
+    "extract_audio": False,  # True = 下载后 ffmpeg 抽音频（--extract-audio）
+    "audio_format": "mp3",   # 转音频目标格式（--audio-format）
+    "quality": "best",       # best/1080p/720p/480p/360p（--quality）
+}
+
+
+def set_ytdlp_opts(playlist=None, playlist_max=None, extract_audio=None,
+                   audio_format=None, quality=None) -> Dict:
+    """设置 yt-dlp 能力开关（None = 保持不变）。main() 解析 CLI 后调用一次。
+    返回当前生效配置（供诊断输出）。"""
+    if playlist is not None:
+        _YTDLP_OPTS["playlist"] = bool(playlist)
+    if playlist_max is not None:
+        _YTDLP_OPTS["playlist_max"] = max(0, int(playlist_max))
+    if extract_audio is not None:
+        _YTDLP_OPTS["extract_audio"] = bool(extract_audio)
+    if audio_format is not None:
+        _YTDLP_OPTS["audio_format"] = audio_format
+    if quality is not None:
+        _YTDLP_OPTS["quality"] = quality
+    return dict(_YTDLP_OPTS)
+
+
+def _ytdlp_format(quality: str) -> str:
+    """--quality → yt-dlp format 串（纯函数，离线可测）。
+    best 保持原串零变化；Np = 清晰度封顶，层层回退（低清源/纯DASH站不空手）。
+    回退链实测依据（B站 BV1GJ411c7Ud）：
+    - B站等站全是 DASH 分离流（video only/audio only，无渐进单文件）——
+      `best` 只匹配音视频合一格式，纯 DASH 站上必落空，末端必须兜回
+      bestvideo+bestaudio（合并分离流）；
+    - 竖屏视频"高度"是长边（480P 档=480x852），按 height<=480 会全灭——
+      补 width<={h} 一招，恰好命中竖屏的同名清晰度档。"""
+    q = (quality or "best").lower().strip()
+    if q in ("", "best"):
+        return "bestvideo+bestaudio/best"
+    m = re.match(r"^(\d{3,4})p$", q)
+    if m:
+        h = m.group(1)
+        return (f"bestvideo[height<={h}]+bestaudio/"
+                f"bestvideo[width<={h}]+bestaudio/"
+                f"best[height<={h}]/"
+                f"bestvideo+bestaudio/best")
+    return "bestvideo+bestaudio/best"
+
+
+def _build_ydl_opts(output_dir: Path, opts: Optional[Dict] = None) -> Dict:
+    """_download_with_ytdlp 的 ydl_opts 组装（纯函数，opts 缺省读模块级状态）。
+    独立成函数是为了离线单测：不发网络也能断言各开关的字典形态。
+    cookie / ffmpeg 注入仍留在 _download_with_ytdlp（那两步有 IO 和错误语义）。"""
+    o = dict(_YTDLP_OPTS) if opts is None else dict(opts)
+    ydl_opts = {
+        # 文件名限长（v1.22.0 压测修复）：无专用适配器的站点（汽水音乐等）generic
+        # extractor 会把 URL 长参数（sec_sharer_id 长 base64 等）塞进 title/id，
+        # Windows 路径超 260 上限 → .part 打开 Errno 2 三路全挂。
+        # 三道保险：title 截 60 + id 截 30 + trim_file_name 清洗后再硬限 120。
+        "outtmpl": str(output_dir / "%(title).60s [%(id).30s].%(ext)s"),
+        "trim_file_name": 120,
+        "quiet": True,
+        "no_warnings": True,
+        # 进度条污染 stdout（v1.22.1 网易云压测排雷）：quiet 只拦 to_screen，
+        # 下载进度走 _multiline.print_at_line 直接写 stdout——--json 模式的
+        # 标准输出被 [download] xx% 糊一脸，下游 JSON 解析全崩。noprogress 掐掉。
+        "noprogress": True,
+        "restrictfilenames": True,
+        "format": _ytdlp_format(o.get("quality", "best")),
+        "merge_output_format": "mp4",
+    }
+    if not o.get("playlist"):
+        # 默认单视频语义（设计保留）：URL 属于合集时只下本条
+        ydl_opts["noplaylist"] = True
+    elif o.get("playlist_max", 0) > 0:
+        ydl_opts["playlistend"] = int(o["playlist_max"])
+    if o.get("extract_audio"):
+        # 转音频只拉音轨（流量减半），ffmpeg 抽转目标格式；preferredquality 0 = 尽量原质
+        ydl_opts["format"] = "bestaudio/best"
+        ydl_opts["postprocessors"] = [{
+            "key": "FFmpegExtractAudio",
+            "preferredcodec": o.get("audio_format", "mp3"),
+            "preferredquality": "0",
+        }]
+    return ydl_opts
+
+
 def _download_with_ytdlp(url: str, output_dir: Path, safe: bool = False,
                          cookie_file: str = "", cookies_from_browser: str = ""):
     """Try yt-dlp first. Returns (saved_list, error_string).
@@ -146,24 +240,13 @@ def _download_with_ytdlp(url: str, output_dir: Path, safe: bool = False,
     except ImportError:
         return [], "yt-dlp not installed"
     output_dir.mkdir(parents=True, exist_ok=True)
-    ydl_opts = {
-        # 文件名限长（v1.22.0 压测修复）：无专用适配器的站点（汽水音乐等）generic
-        # extractor 会把 URL 长参数（sec_sharer_id 长 base64 等）塞进 title/id，
-        # Windows 路径超 260 上限 → .part 打开 Errno 2 三路全挂。
-        # 三道保险：title 截 60 + id 截 30 + trim_file_name 清洗后再硬限 120。
-        "outtmpl": str(output_dir / "%(title).60s [%(id).30s].%(ext)s"),
-        "trim_file_name": 120,
-        "noplaylist": True,
-        "quiet": True,
-        "no_warnings": True,
-        # 进度条污染 stdout（v1.22.1 网易云压测排雷）：quiet 只拦 to_screen，
-        # 下载进度走 _multiline.print_at_line 直接写 stdout——--json 模式的
-        # 标准输出被 [download] xx% 糊一脸，下游 JSON 解析全崩。noprogress 掐掉。
-        "noprogress": True,
-        "restrictfilenames": True,
-        "format": "bestvideo+bestaudio/best",
-        "merge_output_format": "mp4",
-    }
+    if _YTDLP_OPTS.get("extract_audio") and not _ffmpeg_path():
+        sys.stderr.write("[ytdlp] --extract-audio 需要 ffmpeg 转码，未检测到 ffmpeg——"
+                         "下载可成功但转码步会失败，建议先装 ffmpeg\n")
+    ydl_opts = _build_ydl_opts(output_dir)
+    # 全局代理（v1.23.0）：设了 --proxy 就连 yt-dlp 一起走
+    if get_proxy():
+        ydl_opts["proxy"] = get_proxy()
     # 登录态 cookie：抖音/B站等强制登录才给视频流的站点靠这个过墙
     if cookie_file:
         if Path(cookie_file).is_file():
@@ -285,7 +368,7 @@ def _download_direct(url: str, output_dir: Path, safe: bool = False):
                 "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
             },
         )
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with _proxy_urlopen(req, timeout=30) as resp:
             data = resp.read()
             content_type = resp.headers.get("Content-Type", "")
         if ext not in MEDIA_EXTENSIONS:
@@ -904,7 +987,7 @@ def _http_fetch_media(url: str, page_url: str = "", timeout: int = 20,
             parsed = urllib.parse.urlparse(page_url)
             headers["Referer"] = f"{parsed.scheme}://{parsed.netloc}/"
         req = urllib.request.Request(url, headers=headers)
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with _proxy_urlopen(req, timeout=timeout) as resp:
             data = resp.read()
             ct = resp.headers.get("Content-Type", "")
             status = getattr(resp, "status", None) or resp.getcode()
@@ -1275,48 +1358,102 @@ def _file_direct_download(url: str, dest_dir: Path, safe: bool = False, referer:
 
 
 def _file_direct_download_ua(url: str, dest_dir: Path, safe: bool, referer: str, ua: str) -> Optional[Dict]:
-    """_file_direct_download 的单 UA 实现（同一段流式下载逻辑跑不同 UA）。"""
-    req = urllib.request.Request(url, headers={
-        "User-Agent": ua,
-        **({"Referer": referer} if referer else {}),
-    })
+    """_file_direct_download 的单 UA 实现（同一段流式下载逻辑跑不同 UA）。
+    v1.23.0 断点续传：写 .part 临时文件，中断后下次从 Range: bytes=N- 续传，
+    完整收到 EOF 才转正为最终文件名——修复两个实测缺陷：
+    ①旧版直接写最终名，中断留下的半截文件"看起来是成品"（<64B 才删）；
+    ②2GB 文件下到 90% 断掉只能从头再来。服务器不支持 Range（回 200）就
+    清掉 .part 重来；同 URL 已有成品直接复用（幂等，省流量）。"""
+    headers = {"User-Agent": ua, **({"Referer": referer} if referer else {})}
     try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
+        req = urllib.request.Request(url, headers=headers)
+        with _proxy_urlopen(req, timeout=60) as resp:
             ct = (resp.headers.get("Content-Type", "") or "").lower().split(";")[0].strip()
             # 网页不是文件本体（防壳页/错误页存成假文件）
             if ct in ("text/html", "application/xhtml+xml"):
                 return None
             fname = _filename_from_disposition(resp, url)
             fname = re.sub(r'[\\/:*?"<>|]+', "_", fname).strip(" .") or "file"
+            fname = _cap_filename(fname)
             # 安全模式：可执行文件白名单拦截（下载前就挡）
             if safe and _safe_save_reason(fname, 0):
                 sys.stderr.write(f"[safe-block] 文件下载拒绝: {fname}\n")
                 return None
             dest_dir.mkdir(parents=True, exist_ok=True)
-            path = dest_dir / fname
-            size = 0
+            dest = dest_dir / fname
+            # 成品已存在（此前下过同 URL）：幂等复用，不再重下
+            if dest.exists() and dest.stat().st_size >= 64:
+                return {"url": url, "path": str(dest), "size": dest.stat().st_size,
+                        "kind": "file", "content_type": ct, "via": "already-cached"}
+            part = dest_dir / (fname + ".part")
+            offset = 0
+            if part.exists():
+                offset = part.stat().st_size
+            if offset > 0:
+                # 丢掉首次响应，带 Range 续传（.part 保留原则：只有服务器明确
+                # 不支持 Range 时才清；网络错误保留，下次接着传）
+                try:
+                    resp.close()
+                except Exception:
+                    pass
+                try:
+                    rreq = urllib.request.Request(
+                        url, headers={**headers, "Range": f"bytes={offset}-"})
+                    resp = _proxy_urlopen(rreq, timeout=60)
+                    if getattr(resp, "status", 0) != 206:
+                        resp.close()
+                        part.unlink(missing_ok=True)  # 服务器不支持 Range：作废重来
+                        offset = 0
+                        resp = _proxy_urlopen(urllib.request.Request(url, headers=headers),
+                                              timeout=60)
+                except urllib.error.HTTPError as he:
+                    if he.code == 416 and offset >= 64:
+                        # 续传起点==文件总长：.part 其实已完整，直接转正
+                        sys.stderr.write(f"[file-dl] 断点续传完成: {fname}"
+                                         f"（.part 已是完整文件）\n")
+                        part.replace(dest)
+                        return {"url": url, "path": str(dest), "size": offset,
+                                "kind": "file", "content_type": ct, "via": "direct",
+                                "resumed_from": offset}
+                    sys.stderr.write(f"[file-dl] 续传请求失败({he.code})，.part 保留下次再续\n")
+                    return None
+                except Exception:
+                    return None  # 网络错误：.part 保留，下次同 URL 自动续传
+            size = offset
             over_limit = False
-            with open(path, "wb") as f:
-                while True:
-                    chunk = resp.read(8 * 1024 * 1024)
-                    if not chunk:
-                        break
-                    size += len(chunk)
-                    # 安全模式 2GB 上限必须在流式过程中执行（预检 content-length
-                    # 可伪造/缺失；此前边下边写不查大小，恶意大文件能写满磁盘）
-                    if safe and size > SAFE_MAX_FILE_BYTES:
-                        over_limit = True
-                        break
-                    f.write(chunk)
+            try:
+                with open(part, ("ab" if offset else "wb")) as f:
+                    while True:
+                        chunk = resp.read(8 * 1024 * 1024)
+                        if not chunk:
+                            break
+                        size += len(chunk)
+                        # 安全模式 2GB 上限必须在流式过程中执行（预检 content-length
+                        # 可伪造/缺失；此前边下边写不查大小，恶意大文件能写满磁盘）
+                        if safe and size > SAFE_MAX_FILE_BYTES:
+                            over_limit = True
+                            break
+                        f.write(chunk)
+            finally:
+                try:
+                    resp.close()
+                except Exception:
+                    pass
             if over_limit:
-                path.unlink(missing_ok=True)
+                part.unlink(missing_ok=True)
                 sys.stderr.write(f"[safe-block] 文件超过2GB上限，已中断删除: {url[:120]}\n")
                 return None
+            # 正常读到 EOF = 完整：.part 转正。异常中断走不到这里，
+            # .part 保留（文件名带 .part 明示未完成），下次同 URL 自动续传
             if size < 64:
-                path.unlink(missing_ok=True)
+                part.unlink(missing_ok=True)
                 return None
-            return {"url": url, "path": str(path), "size": size, "kind": "file",
-                    "content_type": ct, "via": "direct"}
+            if offset:
+                sys.stderr.write(f"[file-dl] 断点续传完成: {fname}（续传自 {offset}B）\n")
+            part.replace(dest)
+            return {"url": url, "path": str(dest), "size": size, "kind": "file",
+                    "content_type": ct, "via": "direct",
+                    **({"resumed_from": offset} if offset else {})}
     except Exception as exc:
         sys.stderr.write(f"[file-dl] error: {exc} url={url[:120]}\n")
         return None
