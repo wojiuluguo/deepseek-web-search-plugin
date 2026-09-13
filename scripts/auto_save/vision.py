@@ -255,13 +255,17 @@ def _vision_find_el(page, cmd: Dict, for_type: bool = False):
     sel = str(cmd.get("selector", "") or "").strip()
     txt = "" if for_type else str(cmd.get("text", "") or "").strip()
     if sel:
+        sel_err = ""
         try:
             loc = page.locator(sel).first
             if loc.count() > 0:
                 return loc, f"选择器 {sel}"
-        except Exception:
+        except Exception as exc:
             loc = None
-        for fr in list(page.frames)[1:]:  # [0] 是主 frame，已试过
+            sel_err = str(exc)  # 保住 Playwright 的解析错误文本（诊断线索，勿吞）
+        for fr in list(page.frames):
+            if fr is page.main_frame:
+                continue  # 已试过（按身份过滤：frames 列表顺序无官方契约）
             try:
                 cand = fr.locator(sel).first
                 if cand.count() > 0:
@@ -270,12 +274,14 @@ def _vision_find_el(page, cmd: Dict, for_type: bool = False):
                 continue
         if loc is not None:
             return loc, f"选择器 {sel}"  # 主 frame 原样返回：错误语义与旧行为一致
-        return None, f"选择器无效: {sel}"
+        return None, f"选择器无效: {sel_err or sel}"
     if txt:
         loc = page.get_by_text(txt, exact=False).first
         if loc.count() > 0:
             return loc, f"文字“{txt}”"
-        for fr in list(page.frames)[1:]:
+        for fr in list(page.frames):
+            if fr is page.main_frame:
+                continue
             try:
                 cand = fr.get_by_text(txt, exact=False).first
                 if cand.count() > 0:
@@ -614,7 +620,9 @@ def _vision_exec_action(page, cmd: Dict, output_dir: Path, prefix: str,
                 vw = page.viewport_size or {}
             except Exception:
                 vw = {}
-            for fi, fr in enumerate(list(page.frames)[1:], start=1):
+            for fi, fr in enumerate(
+                    [f for f in page.frames if f is not page.main_frame], start=1):
+                # 按身份过滤子 frame（frames 列表顺序无官方契约，不能假设 [0] 是主 frame）
                 if len(els) >= 60:
                     break
                 try:

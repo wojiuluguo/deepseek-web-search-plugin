@@ -4,7 +4,7 @@
 
 OpenClaw Skill：让 DeepSeek 模型能搜索、会搜索、并且"该搜就搜"，还能自动下载网页里的视频/音频/图片/文件，多模态模型还能"看页面+操作页面"。
 
-> 当前版本 **v1.23.0**（2026-09-14）· 作者：user（抖音号: 94636651553）· [更新记录](#更新记录)
+> 当前版本 **v1.23.1**（2026-09-14）· 作者：user（抖音号: 94636651553）· [更新记录](#更新记录)
 
 <p align="center"><img src="assets/mascot.png" alt="deepseek-web-search 吉祥物" width="220"></p>
 
@@ -234,6 +234,17 @@ deepseek-web-search-plugin/
 - **费用提醒**：视觉模式（`--method vision` 无头浏览器会话）按截图付费，消费金额较大，一般用户不推荐使用；搜索/下载/抓正文等其他路线全部免费
 
 ## 更新记录
+
+### v1.23.1（2026-09-14）
+
+v1.23.0 上线即自审（每条疑点走"判定→理由→反问→确认"四步），修 4 项、判非 bug 2 项留痕：
+
+- **修：frames 顺序假设**——`page.frames[1:]` 隐含"索引 0=主 frame"，Playwright 只契约 `main_frame` 属性不保证列表顺序；改为按身份过滤（`fr is not page.main_frame`，3 处）。
+- **修：`--proxy` 未覆盖 `--query` 自动搜索步骤**（help 却写"覆盖全部出口"）——反问后发现 `run_search` 本来就有 `proxy` 参数，线是现成的：`_search_first_media_url` 6 处调用全部接上 `proxy=get_proxy()`，help 无需降级。
+- **修：`_vision_find_el` 吞掉 Playwright 选择器解析错误文本**（诊断信息退化）——异常文本保留进 note。
+- **修：`--playlist-max` 不带 `--playlist` 时静默无效**——按项目 v1.12.1 问题清单第 3 条（"--safe 被接受但从未生效"定级"高"）同类判例，加一次性 stderr 告警。
+- **判非 bug（留痕）**：①断点续传无 ETag/If-Range 内容校验——旧行为严格更差、完整修复需持久化校验头，媒体另有 ffmpeg 解码兜底，记入 docstring 已知局限；②成品与 `.part` 并存——原子 `replace` + already-cached 短路使正常流程不可达。
+- **回归**：`tests/run_all.py` 4 文件全绿；`--playlist-max` 告警与下载行为实测（count=1）；`routing.get_proxy` 接线单查通过。
 
 ### v1.23.0（2026-09-14）
 

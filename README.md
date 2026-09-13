@@ -4,7 +4,7 @@ English | **[中文](README.zh-CN.md)**
 
 An [OpenClaw](https://github.com/openclaw) skill that gives DeepSeek real web search **and** an auto-save browser that downloads videos/audio/images/files from any webpage it opens — plus a vision mode for multimodal models (see a page, operate a page).
 
-> Current version **v1.23.0** (2026-09-14) · Author: user (Douyin ID: 94636651553) · [Changelog](#changelog)
+> Current version **v1.23.1** (2026-09-14) · Author: user (Douyin ID: 94636651553) · [Changelog](#changelog)
 
 <p align="center"><img src="assets/mascot.png" alt="deepseek-web-search mascot" width="220"></p>
 
@@ -232,6 +232,17 @@ deepseek-web-search-plugin/
 - **Cost note**: Vision mode (`--method vision`, headless browser session) is billed per screenshot and costs a nontrivial amount — not recommended for general users; all other routes (search/download/text) are completely free
 
 ## Changelog
+
+### v1.23.1 (2026-09-14)
+
+Self-review of v1.23.0 on day one (every suspect walked the full verdict → reasons → counter-question → confirm loop): 4 fixed, 2 ruled not-bugs with rationale kept on record.
+
+- **Fix: frame-order assumption** — `page.frames[1:]` implicitly assumed index 0 is the main frame; Playwright only contracts the `main_frame` property, not list order. Now filtered by identity (`fr is not page.main_frame`, 3 sites).
+- **Fix: `--proxy` didn't cover the `--query` auto-search step** (while help claimed "every exit path") — counter-question revealed `run_search` already had a `proxy` parameter; all 6 `_search_first_media_url` call sites now pass `proxy=get_proxy()`, so the help text stands.
+- **Fix: `_vision_find_el` swallowed Playwright's selector-parse error text** (diagnostics regression) — exception text is preserved into the note again.
+- **Fix: `--playlist-max` without `--playlist` was silently ignored** — same class as issue #3 of the project's own v1.12.1 review ("`--safe` accepted but never effective", rated high); a one-shot stderr warning now fires.
+- **Ruled not-bugs (on record)**: ① resume lacks ETag/If-Range content validation — strictly better than the old behavior, a full fix needs persisted validators, and media has ffmpeg decode verification as a backstop (documented as a known limitation in the docstring); ② finished file coexisting with `.part` — atomic `replace` plus the already-cached short-circuit make it unreachable in normal flow.
+- **Regression**: `tests/run_all.py` all 4 files green; `--playlist-max` warning and download behavior live-tested (count=1); `routing.get_proxy` wiring unit-checked.
 
 ### v1.23.0 (2026-09-14)
 

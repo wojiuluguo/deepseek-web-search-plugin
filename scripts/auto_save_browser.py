@@ -750,6 +750,11 @@ def main(argv=None):
     realheadless.set_enabled(args.real_headless == "on")
     # v1.23.0：全局代理（浏览器路线/urllib 直连/yt-dlp 三处共用一个状态）
     set_proxy(args.proxy)
+    # 显式参数静默无效 = 项目问题清单 v1.12.1 第 3 条同类缺陷（当时定级"高"），
+    # 依赖组合不满足必须响一声，不许装没听见
+    if args.playlist_max and not args.playlist:
+        print("[提示] --playlist-max 只在 --playlist 开启时生效（本次被忽略）",
+              file=sys.stderr)
     # v1.23.0：yt-dlp 能力开关（播放列表/转音频/清晰度）同样落模块级，
     # 默认全关 = 与 v1.22.1 行为逐字节一致（noplaylist 单视频语义保留）
     set_ytdlp_opts(playlist=args.playlist,

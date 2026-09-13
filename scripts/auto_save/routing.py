@@ -7,6 +7,7 @@ import sys
 import urllib.parse
 from typing import Dict, List, Optional
 
+from .browser_base import get_proxy
 from .constants import (
     AUDIO_EXTS, FILE_EXTS, IMAGE_EXTS,
     AUDIO_LIKE_HOSTS, IMAGE_LIKE_HOSTS, SEARCH_REDIRECT_HOSTS, VIDEO_LIKE_HOSTS,
@@ -273,12 +274,13 @@ def _search_first_media_url(
     domestic = ["sogou", "so360", "baidu", "bing"]
 
     if media_type == "video":
-        data = run_search(query, max_results, domestic, safe=safe)
+        data = run_search(query, max_results, domestic, proxy=get_proxy(), safe=safe)
         url = _pick_media_url(data.get("results", []), query, "video")
         if not url:
             # 国内引擎没找到时再退回通用引擎组合。
             from searchkit.browser import _resolve_engines
-            data = run_search(query, max_results, _resolve_engines("", "general"), safe=safe)
+            data = run_search(query, max_results, _resolve_engines("", "general"),
+                              proxy=get_proxy(), safe=safe)
             url = _pick_media_url(data.get("results", []), query, "video")
         if url:
             # 引擎索引的平台搜索页只带残缺关键词（如只"抖音"二字，压测实测），
@@ -296,7 +298,7 @@ def _search_first_media_url(
         return _platform_search_url(query)
 
     if media_type == "image":
-        data = run_search(query, max_results, domestic, safe=safe)
+        data = run_search(query, max_results, domestic, proxy=get_proxy(), safe=safe)
         url = _pick_media_url(data.get("results", []), query, "image")
         if url:
             return url
@@ -306,7 +308,7 @@ def _search_first_media_url(
     if media_type == "file":
         # 文件电路：先原词挑文件直链，挑不到换"关键词 下载"重搜一次
         for q in (query, f"{query} 下载"):
-            data = run_search(q, max_results, domestic, safe=safe)
+            data = run_search(q, max_results, domestic, proxy=get_proxy(), safe=safe)
             url = _pick_media_url(data.get("results", []), query, "file")
             if url:
                 return url
@@ -314,7 +316,7 @@ def _search_first_media_url(
 
     if media_type == "text":
         # 文本电路：挑第一个非视频站的结果（文章页优先，跳过视频站和跳转壳）
-        data = run_search(query, max_results, domestic, safe=safe)
+        data = run_search(query, max_results, domestic, proxy=get_proxy(), safe=safe)
         url = _pick_media_url(data.get("results", []), query, "text")
         return url
 

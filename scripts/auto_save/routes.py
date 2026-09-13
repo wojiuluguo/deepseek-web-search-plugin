@@ -1363,7 +1363,9 @@ def _file_direct_download_ua(url: str, dest_dir: Path, safe: bool, referer: str,
     完整收到 EOF 才转正为最终文件名——修复两个实测缺陷：
     ①旧版直接写最终名，中断留下的半截文件"看起来是成品"（<64B 才删）；
     ②2GB 文件下到 90% 断掉只能从头再来。服务器不支持 Range（回 200）就
-    清掉 .part 重来；同 URL 已有成品直接复用（幂等，省流量）。"""
+    清掉 .part 重来；同 URL 已有成品直接复用（幂等，省流量）。
+    已知局限：无 ETag/If-Range 校验，同 URL 内容在两次会话间变更时可能拼出
+    "旧头新尾"文件——完整修复需持久化校验头，媒体类另有 ffmpeg 解码验证兜底。"""
     headers = {"User-Agent": ua, **({"Referer": referer} if referer else {})}
     try:
         req = urllib.request.Request(url, headers=headers)
