@@ -49,6 +49,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -553,6 +554,27 @@ def _append_manifest(output_dir: Path, data: Dict) -> None:
         pass
 
 
+def _start_global_timeout(seconds: int) -> None:
+    """全局看门狗（v1.24.0）：整条命令的墙钟上限。chain 各步单独有界但总和
+    无界（v1.23.3 压测实锤：网易云歌曲页 15 分钟零输出挂死，进程低 CPU 纯
+    等待）——AI Agent/脚本调用方需要一个"必然结束"的保证。触发即 stderr
+    告知 + os._exit(1)：跳过正常收尾（挂死场景下清理本就无从谈起；
+    Playwright driver 检测到管道关闭会带走无头浏览器）。0 = 关闭（默认，
+    旧行为不变）。"""
+    if seconds <= 0:
+        return
+
+    def _fire():
+        sys.stderr.write(f"\n[timeout] 全局看门狗：整条命令超过 {seconds}s 未完成，强制退出"
+                         "（chain 各步有界但总和无界——这就是『必然结束』保证）\n")
+        sys.stderr.flush()
+        os._exit(1)
+
+    t = threading.Timer(seconds, _fire)
+    t.daemon = True
+    t.start()
+
+
 def main(argv=None):
     # 输出编码说明（v1.22.0 压测后修正）：Windows 中文环境下 Python 管道输出默认用
     # locale 编码（GBK），与常见终端/重定向查看端一致——保持默认即可正确显示。
@@ -572,6 +594,15 @@ def main(argv=None):
     parser.add_argument("--wait", type=int, default=8, help="基础等待秒数（auto-wait 开启时只是下限，会自动延长到视频抓完）")
     parser.add_argument("--max-wait", type=int, default=180, help="自动等待的硬上限秒数（默认 180）")
     parser.add_argument("--no-auto-wait", action="store_true", help="关闭 wait 自适应，只等 --wait 秒")
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=0,
+        metavar="秒",
+        help="全局看门狗（v1.24.0）：整条命令超过 N 秒未完成强制退出（默认 0=关闭）。"
+             "chain 各步单独有超时但总和无界——网易云歌曲页等极端页面可能无限挂住，"
+             "AI Agent/脚本调用建议统一带 --timeout 600。超时强退输出 [timeout] 标记并 exit 1",
+    )
     parser.add_argument("--save-junk", action="store_true", help="保存垃圾资源（封面/图标等）到 junk/ 子目录（默认直接丢弃）")
     parser.add_argument("--keep-segments", action="store_true", help="合并成功后保留原始 cache_segments（默认自动清理）")
     parser.add_argument(
@@ -744,6 +775,9 @@ def main(argv=None):
     )
     parser.add_argument("--json", action="store_true", help="Output JSON")
     args = parser.parse_args(argv)
+
+    # v1.24.0 全局看门狗：先于一切工作启动（挂在任何阶段都能兜住）
+    _start_global_timeout(args.timeout)
 
     # ---- v1.22.0 行为开关落到模块级（避免参数层层穿透各路线）----
     set_humanize(args.humanize == "on")

@@ -4,7 +4,7 @@ English | **[中文](README.zh-CN.md)**
 
 An [OpenClaw](https://github.com/openclaw) skill that gives DeepSeek real web search **and** an auto-save browser that downloads videos/audio/images/files from any webpage it opens — plus a vision mode for multimodal models (see a page, operate a page).
 
-> Current version **v1.23.3** (2026-09-14) · Author: user (Douyin ID: 94636651553) · [Changelog](#changelog)
+> Current version **v1.24.0** (2026-09-14) · Author: user (Douyin ID: 94636651553) · [Changelog](#changelog)
 
 <p align="center"><img src="assets/mascot.png" alt="deepseek-web-search mascot" width="220"></p>
 
@@ -232,6 +232,15 @@ deepseek-web-search-plugin/
 - **Cost note**: Vision mode (`--method vision`, headless browser session) is billed per screenshot and costs a nontrivial amount — not recommended for general users; all other routes (search/download/text) are completely free
 
 ## Changelog
+
+### v1.24.0 (2026-09-14)
+
+New source-type stress round (Fanqie novels / Qidian / Ximalaya) + an AI-Agent fuse:
+
+- **`--timeout N` global watchdog (new)**: each chain stage has its own timeout but **their sum is unbounded** — extreme pages (NetEase song pages, confirmed in v1.23.3: 15 minutes of silence) can hang forever. Any command with `--timeout 600` now hard-exits after N seconds (stderr `[timeout]` marker + exit 1), giving AI agents a "guaranteed to finish" promise. Subprocess kill-test added to the suite (tests/test_timeout_watchdog.py; suite now 6 files, all green).
+- **Fanqie novels (web free tier): second hang confirmed** — the static HTML exposes 352 "第X章" links (TOC parsing fine), but the text route hangs with the same signature as NetEase (near-zero CPU, zero output); **`--timeout 90` proven live: forced exit at 90s with exit 1 + the [timeout] marker** — the new watchdog covers exactly these cases.
+- **Qidian VIP behavior, honestly**: for a 1401-chapter book the text route captured exactly **3 chapters** (the free previews), merged into a 29KB txt and labeled 3/1401. The tool takes what the web actually shows and **does not bypass VIP/paywalls** (access-control circumvention is out of scope); content that's free in the mobile app should be consumed in the app.
+- **Ximalaya audio**: audio circuit exercised (see stress records).
 
 ### v1.23.3 (2026-09-14)
 
