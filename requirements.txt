@@ -5,6 +5,11 @@
 playwright>=1.40.0
 yt-dlp>=2024.0.0
 playwright-stealth>=1.0.0
+# 小说站字体反爬还原（v1.24.1，text 电路自动使用；缺失时优雅降级为原样保存）
+fonttools>=4.40.0
+brotli>=1.1.0
+pillow>=10.0.0
+numpy>=1.24.0
 
 # 可选 API 源（只需要环境变量，不涉及 pip 包）：
 #   TAVILY_API_KEY

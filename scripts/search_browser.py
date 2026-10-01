@@ -95,6 +95,10 @@ def main(argv=None):
         default="full",
         help="浏览器伪装档位：full=全套（默认，playwright-stealth 深层指纹补丁，显著提升搜狗等风控站通过率）；basic=半套（自带伪装）；off=关闭",
     )
+    parser.add_argument(
+        "--no-resolve", action="store_true",
+        help="跳过跳转壳解码（v1.25.0 默认解码：跳转壳链接跟随还原为真实 URL；失败自动保留原壳）",
+    )
     args = parser.parse_args(argv)
 
     query = (args.query or args.query_pos or "").strip()
@@ -116,7 +120,7 @@ def main(argv=None):
 
     engines = _resolve_engines(args.engines, args.category, query)
     data = run_search(query, args.max_results, engines, proxy=args.proxy, safe=args.safe,
-                      stealth=args.stealth)
+                      stealth=args.stealth, resolve_shells=not args.no_resolve)
 
     data["results"] = _filter_results(data.get("results", []), args.ad_filter)
     if args.site:

@@ -429,7 +429,10 @@ def auto_save_url(
     if method == "text":
         return _text_route(url, output_dir, headed=headed, safe=safe,
                            max_chapters=max_chapters, allow_chapters=allow_chapters,
-                           stealth=stealth)
+                           stealth=stealth,
+                           cookie_file=cookie_file,
+                           cookies_from_browser=cookies_from_browser,
+                           profile_dir=profile_dir)
 
     # harvest：只走 DOM/元数据/JSON 收割 + 页面上下文下载，快（无长等待），适合照片/音频。
     if method == "harvest":
@@ -664,7 +667,7 @@ def main(argv=None):
         "--max-chapters",
         type=int,
         default=100,
-        help="text 路线专用：小说/长文目录页最多抓多少章合并（默认 100）",
+        help="text 路线专用：小说/长文目录页最多抓多少章合并（默认 100，0=不限）",
     )
     parser.add_argument("--headed", action="store_true", help="显示浏览器窗口（默认无头）")
     # ---- yt-dlp 能力开关（v1.23.0，全部 opt-in，默认关闭 = 旧行为）----

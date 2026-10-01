@@ -1,8 +1,9 @@
-"""API Key 引擎：tavily/brave/searxng（环境变量存在才启用）（v1.22.0 批 C 自 search.py 搬迁，零逻辑改动）。
-依赖 searchkit.http 的公共请求件；注册表在 engines/__init__.py。"""
+"""API Key 引擎：tavily/brave/searxng（环境变量存在才启用）（v1.22.0 批 C 自 search.py 搬迁）。
+v1.25.0 普查修正：无 Key 时旧版静默 return []（误导为 "no results"），改抛
+NotConfiguredError 如实报缺少的环境变量。依赖 searchkit.http 的公共请求件。"""
 from typing import Dict, List
 
-from ..http import _clean_html, _fetch, _post_json, _result
+from ..http import NotConfiguredError, _clean_html, _fetch, _post_json, _result
 from ..normalize import _normalize_url
 
 import json
@@ -13,7 +14,7 @@ import urllib.parse
 def search_tavily(query: str, max_results: int, timeout: int) -> List[Dict[str, str]]:
     api_key = os.getenv("TAVILY_API_KEY", "").strip()
     if not api_key:
-        return []
+        raise NotConfiguredError("set TAVILY_API_KEY")
     payload = {
         "api_key": api_key,
         "query": query,
@@ -43,7 +44,7 @@ def search_tavily(query: str, max_results: int, timeout: int) -> List[Dict[str, 
 def search_brave(query: str, max_results: int, timeout: int) -> List[Dict[str, str]]:
     api_key = os.getenv("BRAVE_API_KEY", "").strip()
     if not api_key:
-        return []
+        raise NotConfiguredError("set BRAVE_API_KEY")
     url = "https://api.search.brave.com/res/v1/web/search?q=" + urllib.parse.quote(query) + "&count=" + str(max_results)
     headers = {
         "X-Subscription-Token": api_key,
@@ -70,7 +71,7 @@ def search_brave(query: str, max_results: int, timeout: int) -> List[Dict[str, s
 def search_searxng(query: str, max_results: int, timeout: int) -> List[Dict[str, str]]:
     base = os.getenv("SEARXNG_BASE_URL", "").strip().rstrip("/")
     if not base:
-        return []
+        raise NotConfiguredError("set SEARXNG_BASE_URL")
     url = base + "/search?q=" + urllib.parse.quote(query) + "&format=json"
     try:
         data = json.loads(_fetch(url, timeout=timeout))

@@ -4,7 +4,7 @@ English | **[中文](README.zh-CN.md)**
 
 An [OpenClaw](https://github.com/openclaw) skill that gives DeepSeek real web search **and** an auto-save browser that downloads videos/audio/images/files from any webpage it opens — plus a vision mode for multimodal models (see a page, operate a page).
 
-> Current version **v1.24.0** (2026-09-14) · Author: user (Douyin ID: 94636651553) · [Changelog](#changelog)
+> Current version **v1.25.0** (2026-09-28) · Author: user (Douyin ID: 94636651553) · [Changelog](#changelog)
 
 <p align="center"><img src="assets/mascot.png" alt="deepseek-web-search mascot" width="220"></p>
 
@@ -232,6 +232,30 @@ deepseek-web-search-plugin/
 - **Cost note**: Vision mode (`--method vision`, headless browser session) is billed per screenshot and costs a nontrivial amount — not recommended for general users; all other routes (search/download/text) are completely free
 
 ## Changelog
+
+### v1.25.0 (2026-09-28)
+
+Full search stress test + optimization (assets & data: downloads/_search_stress/):
+
+- **Redirect-shell resolution (new, fixes major correctness bug)**: Baidu/360 results are all encrypted redirect shells, and the old dedupe dropped their query params — keys collapsed to one, **8 Baidu results deduped to 1 (7 wrongly killed)**. Fixed: shells keep their query in the dedupe key; new `searchkit/resolve.py` concurrently resolves shells to real URLs (302 follow / shell-page JS extraction, 11/11 restored to real addresses like docs.python.org in testing; same-site landing guard against captcha pollution; failures keep the shell). `--no-resolve` to disable.
+- **Concurrent lightweight engines (2.2x)**: 17 engines serial 45-54s → concurrent (4 workers) **~21s**; smart_search/cross_search/own_search benefit via the shared runner.
+- **Browser-death protection (issue #2 handled)**: stress test F2 proved it worse than documented — after a playwright driver dies, `page.goto` **hangs forever** while python spins (565s CPU observed), with no in-process timeout. Handled: download-circuit search steps moved to subprocess isolation (bounded timeout); browser run_search checks `is_connected()` per engine and marks dead-browser engines as skipped instead of white-waiting.
+- **JS-failure verdict** (matrix C): nothing hangs (all bounded); bing/baidu are SSR (results survive JS-off), so360 needs JS; architectural fallback = the lightweight route needs no JS.
+- **Engine health**: Sogou/360 serve captcha pages to anonymous requests — HTML engines now report `captcha suspected` instead of a blanket "no results".
+- **Full engine census (31 engines tested one-by-one)**: lightweight ok=8/flaky=2; browser ok=2/flaky=1; the rest are network walls and anti-bot (details in downloads/_search_stress/census_*.json). **Fixed two browser engines dead since launch** — arxiv (result titles `<p class="title">` are plain text without `<a>`, the old selector could never get an href) and Eastmoney (real container `div.news_item` with underscore vs the old `.news-item` with hyphen); `_extract_from_items` gains optional `url_sel` for title/link-split structures. API engines (tavily/brave/searxng) now report `set XXX_API_KEY` honestly when unconfigured instead of pretending "no results".
+- **Engine HTML fixture tests (new, first step for issue #4)**: tests/test_engine_fixtures.py + tests/fixtures/engine_html/ (real recorded bing/baidu responses + minimal-structure sogou/360/DDG fixtures) assert parse counts and field completeness — after a site redesign, one run tells you which selector to fix; suite now 7 files.
+- **LAN search (new, own_search.py lan)**: discovers LAN devices/HTTP services/NAS/SMB shares into the local index — read-only probing (TCP port probe + HTTP title/Server identification + `net view` share enumeration), hard-restricted to private ranges (RFC1918), stdlib-only. Verified live: 254 hosts ×12 ports in 15s, correctly identified the Xiaomi router; `search --query 路由器` hits immediately after indexing.
+- **Search unit audit round (strict evidence process)**: 4 suspects tested one-by-one — (1) the 16s tail on walled engines despite timeout=8 is stdlib's *per-operation* timeout semantics (DNS 0.1s / connect 8.0s / data-layer wall proven separately; not a code bug); (2) **`--site` substring-match bug fixed** (`--site python.org` used to admit `notpython.org.evil.com`; now host-suffix match, end-to-end re-verified with zero violating hosts); (3) **news keyword-table fix** ("今天/最新" over-broad words removed — "今天天气怎么样" was classified news, now falls back to general while strong news queries unaffected); (4) dedupe's rebranded-title culling is the intended anti-spam design (locked in as regression). New tests/test_search_units.py (5 tests); suite now 8 files, all green.
+- **Data**: Slow3G / 6x CPU throttle cause no material change (SSR engines hold); offline fails fast in 4.1s; tests/run_all.py 8 files green.
+
+### v1.24.1 (2026-09-24)
+
+Download-pipeline fixes (hang root-caused + novel completeness):
+
+- **Hang root-caused (issue #1 closed)**: two stacked causes — (1) `_extract_body_text` probed 11 selectors via `page.inner_text`, each missing selector waits up to 30s on Fanqie reader pages (custom divs match none) → ~330s wasted per chapter, a 351-chapter book never finishes; (2) `browser.close()` blocks forever on pages with live WebSocket/SSE. Fixed: body extraction now one bounded JS evaluation; `_eval_bounded` caps every unbounded evaluate (driver-enforced timeout); `_close_bounded` closes page→context→browser in order on the main thread (0.7s on the same page); new `[stage]` timing logs make any future hang visible in one line.
+- **Novel font-obfuscation deobfuscation (new)**: about half of Fanqie chapter text uses Private-Use-Area codepoints (renders fine via a CDN woff2, but extracted text loses characters). New `auto_save/novel_font.py` builds a glyph-bitmap mapping from the font (cached in `index/`); 338/362 codes restored in testing, prose reads correctly. Deps fonttools/brotli/pillow/numpy added to requirements.txt; degrades gracefully to raw text if missing.
+- **text route login state + TOC completeness**: `--cookies-from-browser/--profile/cookie_file` now supported on the text route (use your own account entitlement); TOC scroll-expands to collect all chapters; `--max-chapters 0` = unlimited; skipped chapters are classified (vip/lock signals) and reported honestly in JSON. **No paid/VIP bypass** — stance unchanged.
+- **Verified**: Fanqie full book 351/351 chapters, 0 skipped, 497KB (old code couldn't finish 10 chapters in 300s); Douyin video quality=full (16.3s ffmpeg-verified); tests/run_all.py 6 files green.
 
 ### v1.24.0 (2026-09-14)
 

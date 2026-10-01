@@ -4,7 +4,7 @@
 
 OpenClaw Skill：让 DeepSeek 模型能搜索、会搜索、并且"该搜就搜"，还能自动下载网页里的视频/音频/图片/文件，多模态模型还能"看页面+操作页面"。
 
-> 当前版本 **v1.24.0**（2026-09-14）· 作者：user（抖音号: 94636651553）· [更新记录](#更新记录)
+> 当前版本 **v1.25.0**（2026-09-28）· 作者：user（抖音号: 94636651553）· [更新记录](#更新记录)
 
 <p align="center"><img src="assets/mascot.png" alt="deepseek-web-search 吉祥物" width="220"></p>
 
@@ -234,6 +234,30 @@ deepseek-web-search-plugin/
 - **费用提醒**：视觉模式（`--method vision` 无头浏览器会话）按截图付费，消费金额较大，一般用户不推荐使用；搜索/下载/抓正文等其他路线全部免费
 
 ## 更新记录
+
+### v1.25.0（2026-09-28）
+
+搜索功能全面压测与优化（压测资产与数据：downloads/_search_stress/）：
+
+- **跳转壳解码（新能力，修复重大正确性 bug）**：压测实锤百度/360 结果全是加密跳转壳，且旧去重把壳 URL 的 query 参数全丢——key 坍缩成同一个，**百度 8 条结果去重后只剩 1 条（7 条被误杀）**。修复：①壳 URL 保留 query 参与去重 key；②新增 `searchkit/resolve.py` 并发解码壳链接（302 跟随 / 壳页 JS 提取，实测 11/11 还原为 docs.python.org 等真实地址，同源落点防验证页污染，失败保留原壳），`--no-resolve` 可关。
+- **轻量引擎并发（2.2x 提速）**：旧版 17 引擎串行 45-54s → 并发（4 路）后 **~21s**；`smart_search`/`cross_search`/`own_search` 经 runner 统一受益。
+- **浏览器死亡防护（问题 #2 处置）**：压测 F2 实锤比记载更严重——playwright driver 突死后 `page.goto` **永久挂起**且 python 空转烧 CPU（565s 实测），进程内调用无任何超时兜底。处置：①下载电路搜索步从进程内直调改子进程隔离（超时有界）；②浏览器版 run_search 每引擎前查 `is_connected()`，断开如实标记快速失败，不再逐引擎白等。
+- **JS 失败场景定论**（压测 C 矩阵）：系统不会挂死（全部有界）；bing/baidu 是 SSR（JS 禁用仍有结果），so360 依赖 JS；架构兜底 = 轻量版不依赖 JS。
+- **引擎健康度**：搜狗/360 匿名请求返回验证码页实锤，HTML 引擎命中特征如实报 `captcha suspected` 而非笼统 "no results"。
+- **全引擎健康度普查（31 引擎逐个实测）**：轻量 ok=8/flaky=2、浏览器 ok=2/flaky=1，其余为网络墙与反爬（明细见 downloads/_search_stress/census_*.json）。**修复两个从上线起就抓空的浏览器引擎**——arxiv（结果标题 `<p class="title">` 是纯文本无 `<a>`，旧选择器永远取不到链接）、东方财富（真实容器 `div.news_item` 下划线，旧选择器写成连字符 `.news-item`）；`_extract_from_items` 新增可选 `url_sel` 支持标题/链接分离结构。API 引擎（tavily/brave/searxng）无 Key 时如实报 `set XXX_API_KEY` 而非假装 "no results"。
+- **引擎 HTML 夹具测试（新，问题清单 #4 落地第一块砖）**：tests/test_engine_fixtures.py + tests/fixtures/engine_html/（bing/baidu 真实录制响应 + 搜狗/360/DDG 最小结构夹具），断言解析数量与字段齐全——站点改版后跑一次即知哪个选择器该修；套件增至 7 文件。
+- **局域网搜索（新能力，own_search.py lan）**：发现局域网设备/HTTP 服务/NAS/SMB 共享并入本地索引——只读探测（TCP 端口探测 + HTTP 标题/Server 识别 + `net view` 共享枚举），硬性限私网段（RFC1918）防误扫公网，纯 stdlib 零依赖。实测 254 主机 ×12 端口 15s，正确识别小米路由器；入索引后 `search --query 路由器` 即命中。
+- **搜索单元审查轮（严格证据流程）**：4 个疑点逐一实验定性——①墙外引擎 8s 超时实测拖尾 16s 为 stdlib"每操作超时"语义（DNS 0.1s/connect 8s/数据层墙各证，非代码 bug）；②**`--site` 子串匹配 bug 实锤修复**（`--site python.org` 曾放行 `notpython.org.evil.com`，改域后缀匹配，端到端复验零违规 host）；③**news 词表"最新/今天"误分类修复**（"今天天气怎么样"曾被判 news，移除超宽泛词后回落 general 且强新闻词不受影响）；④dedupe 换皮标题互杀为既定防垃圾设计（已固化回归防漂移）。新增 tests/test_search_units.py（5 项），套件增至 8 文件全绿。
+- **实测数据**：Slow3G/CPU 6x 节流对结果无实质影响（SSR 引擎扛住）；离线 4.1s 快速失败；tests/run_all.py 8 文件全绿。
+
+### v1.24.1（2026-09-24）
+
+下载功能专项修复（压测挂死根治 + 小说完整性）：
+
+- **挂死根治（问题清单 #1 销账）**：真凶两层——①`_extract_body_text` 逐个试 11 个选择器，元素不存在时 Playwright 隐式等 30s/个，番茄阅读页全 miss 单章空耗 ~330s（351 章永远跑不完）；②`browser.close()` 对长连页面（WebSocket/SSE）无限阻塞。修复：正文提取改单次 JS 求值 + `_eval_bounded`（driver 强制超时）封顶全部无界 evaluate；`_close_bounded` 主线程 page→context→browser 三级顺序关闭（实测 0.7s 全清）；新增 `[stage]` 分段计时日志——挂点从此一条日志可见。
+- **小说字体反爬还原（新能力）**：番茄正文约一半字符是私有区码位（视觉正常、提取缺字）。新增 `auto_save/novel_font.py`：woff2 字体解析 + 字形位图比对建映射（缓存 `index/novel_font_map_*.json`），实测 338/362 码位还原、正文通顺；依赖 fonttools/brotli/pillow/numpy 入 requirements.txt，缺失时优雅降级原样保存。
+- **text 线登录态 + 目录完整性**：补 `--cookies-from-browser/--profile/cookie_file`（本人账号权限下有权限内容）；目录滚动展开拿全章节、`--max-chapters 0` 不限章数；跳过章节带原因分类（vip/lock 信号检测），`skipped_detail/skip_reasons` 如实进 JSON。**不做付费/VIP 绕过**的立场不变。
+- **实测**：番茄全书 351/351 章 0 跳 497KB（旧代码 300s 走不完 10 章）；抖音视频 quality=full（16.3s ffmpeg 实测）；tests/run_all.py 6 文件全绿。
 
 ### v1.24.0（2026-09-14）
 

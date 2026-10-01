@@ -1,8 +1,8 @@
 ---
 name: deepseek-web-search
 description: DeepSeek 联网搜索技能。遇到实时信息、事实核查、新闻、价格、代码报错、未知名词或用户说“搜一下”时，必须使用本技能搜索并附来源。
-version: 1.24.0
-updated: 2026-09-14
+version: 1.25.0
+updated: 2026-09-28
 author: user（抖音号: 94636651553）
 license: MIT
 tags: [web, search, deepseek, 联网, 搜索]
@@ -28,7 +28,8 @@ tags: [web, search, deepseek, 联网, 搜索]
 | 海外网络/被限流 | 下载命令加 `--proxy "http://host:port"`（贯通浏览器/urllib/yt-dlp/--query 搜索步；搜索另有 `search_browser.py --proxy`） |
 | 只要照片/音频 | `auto_save_browser.py --method harvest --media-type image/audio`；或 `--query "词" --auto --media-type image/audio`（自动走图片/音频专用线） |
 | 下载文件（压缩包/文档/表格/文本/安装包） | `auto_save_browser.py --url 文件直链或页面`（自动走 files 专用线）；文件夹页多文件逐个下，`--zip` 打包成一个 |
-| 抓文章正文/小说章节 | `auto_save_browser.py --url 文章或目录页 --media-type text`（text 专用线：单页正文/小说目录逐章合并成 txt/txt直链直下，`--max-chapters` 控制上限） |
+| 抓文章正文/小说章节 | `auto_save_browser.py --url 文章或目录页 --media-type text`（text 专用线：单页正文/小说目录逐章合并成 txt/txt直链直下；`--max-chapters` 控制上限，`0`=不限；自动还原番茄等站的字体反爬缺字；无权限章节如实跳过并在 JSON 报告原因；需登录态时加 `--cookies-from-browser edge` 等参数） |
+| 局域网搜索 | `own_search.py lan`（发现局域网设备/HTTP 服务/NAS/SMB 共享入本地索引，只读探测限私网段；之后 `own_search.py search --query` 即可搜到，如搜"路由器"） |
 | 校验抓包产物/分正片垃圾/查虚标 | `verify_capture.py --dir <产物目录>` |
 | 网站可疑/怕挖矿病毒/保护本机 | 任何命令加 `--safe`（安全模式） |
 | 浏览器被识别成机器人/风控拦截 | 默认已全套伪装（`--stealth full`）；仍被拦的强风控站（搜狗 antispider）属 IP/行为层风控，换引擎或加 `--profile` 养登录态 |

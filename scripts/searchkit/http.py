@@ -9,9 +9,37 @@ import urllib.request
 from typing import Dict
 
 __all__ = ["DEFAULT_ENGINES", "DEFAULT_USER_AGENT", "CA_CERT", "set_ca_cert",
-           "_clean_html", "_fetch", "_post_json", "_result"]
+           "CaptchaError", "check_captcha", "_clean_html", "_fetch", "_post_json", "_result"]
 
 DEFAULT_ENGINES = ["bing", "sogou", "so360", "baidu"]
+
+
+class CaptchaError(Exception):
+    """搜索引擎返回验证码/反爬墙（而非正常结果页）。
+    压测实测（v1.25.0）：搜狗匿名请求返回 5384B 验证码页零结果，笼统报
+    "no results" 会误导引擎健康度判断——命中特征时如实报 captcha。"""
+
+
+class NotConfiguredError(Exception):
+    """API 引擎缺少所需的环境变量（v1.25.0 普查修正）：
+    旧行为无 Key 时静默 return []，engine_errors 显示 "no results"——
+    与"搜到了但没结果"无法区分，误导健康度判断。改为如实报缺少哪个变量。"""
+
+# 响应页验证码/反爬特征——只留引擎私有硬特征（URL/JS 标识，正常结果页不可能出现）。
+# v1.25.0 自查修正：曾混入"验证码/安全验证"等宽泛中文词——搜"验证码识别"这类
+# 关键词时正常结果页 snippet 也会命中，会把好引擎误杀成 captcha。
+_CAPTCHA_MARKS = ("antispider", "seccode", "wappass", "just a moment",
+                  "checking your browser", "cf-browser-verification")
+
+
+def check_captcha(page_html: str) -> None:
+    """检测响应 HTML 是否验证码/反爬墙，命中抛 CaptchaError。"""
+    if page_html and len(page_html) < 60000:
+        low = page_html.lower()
+        for mark in _CAPTCHA_MARKS:
+            if mark in low:
+                raise CaptchaError(f"captcha suspected ({mark})")
+
 
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "

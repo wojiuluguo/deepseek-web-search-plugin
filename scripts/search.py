@@ -77,6 +77,10 @@ def main(argv=None):
     )
     parser.add_argument("--cacert", default=None, help="自定义 CA 证书包路径（PEM）")
     parser.add_argument("--timeout", type=int, default=8, help="Per-request timeout seconds")
+    parser.add_argument(
+        "--no-resolve", action="store_true",
+        help="跳过跳转壳解码（v1.25.0 默认解码：百度/360/搜狗壳链接跟随还原为真实 URL，"
+             "去重不再误杀、引用来源直达真实站点；解码失败自动保留原壳）")
     parser.add_argument("--json", action="store_true", help="Output JSON")
     parser.add_argument("--brief", action="store_true", help="精简 JSON 输出（省 token，供大模型直接消费）")
     args = parser.parse_args(argv)
@@ -93,7 +97,8 @@ def main(argv=None):
         query = f'"{query.strip()}"'
 
     engines = _resolve_engines(args.engines, query, args.category)
-    data = run_search(query, args.max_results, engines, args.timeout)
+    data = run_search(query, args.max_results, engines, args.timeout,
+                      resolve_shells=not args.no_resolve)
 
     data["results"] = _filter_results(data.get("results", []), args.ad_filter)
     if args.site:

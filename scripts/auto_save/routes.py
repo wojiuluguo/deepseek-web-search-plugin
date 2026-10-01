@@ -24,11 +24,13 @@ from .browser_base import (
     _open_page, _save_bytes, _wait_for_render,
     _apply_stealth, _browser_launch_args, _launch_chromium,
     get_proxy, _proxy_urlopen,
+    _stage_reset, _stage, _eval_bounded, _close_bounded,
 )
 from .constants import AUDIO_EXTS, FILE_EXTS, SAFE_MAX_FILE_BYTES, USER_AGENTS, VIDEO_EXTS
 from .ffmpeg import (_decoded_duration, _ffmpeg_path, _ffprobe_info, _ffprobe_path,
                      _probe_resolution)
 from .humanize import human_move, human_scroll
+from . import novel_font
 from .urlrules import (CLICK_DOWNLOAD_FILE_TYPES, DOWNLOAD_BUTTON_TEXTS,
                        MEDIA_EXTENSIONS, SHELL_BODY_TEXT_LIMIT, _assess_saved_quality,
                        _cap_filename, _decode_redirect_url, _decode_scheme_target,
@@ -137,6 +139,31 @@ CHAPTER_LINKS_JS = """
     });
     return out;
 }
+"""
+
+# 章节 VIP/锁定信号检测（v1.24.1 正文抓取增强）：正文 <200 字时判断这章是
+# 付钱/登录才能看，还是真没渲染出来——给"小说下不全"一个诚实的解释。
+# 站点无关通用信号：vip/lock/pay 类 class、登录/付费提示词。
+CHAPTER_LOCK_JS = """
+() => {
+    const sels = ['[class*="vip" i]', '[class*="lock" i]', '[class*="pay" i]',
+                  '[class*="mask" i]', '[class*="subscribe" i]'];
+    for (const s of sels) {
+        const el = document.querySelector(s);
+        if (el && (el.offsetHeight || 0) > 0) return s;
+    }
+    const t = document.body ? (document.body.innerText || '') : '';
+    for (const kw of ['登录后', '付费', '订阅后', '解锁', 'VIP章节', '会员专享']) {
+        if (t.includes(kw)) return 'kw:' + kw;
+    }
+    return '';
+}
+"""
+
+# 目录页展开滚动（v1.24.1 小说完整性）：很多小说站目录懒加载/折叠，
+# 首屏只给前 N 章。滚到底触发加载，章节链接数稳定两轮即认为拿全。
+TOC_EXPAND_JS = """
+() => { window.scrollTo(0, document.body.scrollHeight); return document.body.scrollHeight; }
 """
 
 # ---- yt-dlp 能力开关（v1.23.0）：播放列表 / 转音频 / 清晰度 ----
@@ -1550,11 +1577,7 @@ def _file_browser_fetch(url: str, output_dir: Path, safe: bool = False,
                     sys.stderr.write(f"[file-dl:browser] body error: {exc}\n")
             return None
         finally:
-            if browser is not None:
-                try:
-                    browser.close()
-                except Exception:
-                    pass
+            _close_bounded(page=page, browser=browser)
 
 
 def _zip_bundle(folder: Path, output_dir: Path) -> Optional[str]:
@@ -1886,6 +1909,8 @@ def _files_route(
     4. click_download=True（--click-download 显式开启）→ 页面没有文件直链时，
        自动点下载按钮 + 网络嗅探真链接（APK 分享页"跳转自家 APP"场景）。
        激进模式默认关闭：会程序化点击页面按钮。"""
+    _stage_reset()
+    _stage("files:开始")
     base = {"mode": "url", "source_url": url, "output_dir": str(output_dir), "method": "files"}
 
     # 1) 文件直链（两招阶梯：urllib 流式 → Chromium 指纹，治 JA3 拦截）
@@ -1967,8 +1992,7 @@ def _files_route(
                     elif not links:
                         files_error = "no file links found on page"
                 finally:
-                    if browser is not None:
-                        browser.close()
+                    _close_bounded(page=page, browser=browser)
         except Exception as exc:
             files_error = f"browser error: {exc}"
 
@@ -1992,39 +2016,60 @@ def _files_route(
 
 
 
+_BODY_TEXT_JS = """
+() => {
+    const sels = ['article', 'main', '.content', '#content', '.article-content',
+                  '#chapter-content', '.chapter-content', '#txtContent',
+                  '.muye-reader-content', '.reader-content', 'body'];
+    for (const s of sels) {
+        const el = document.querySelector(s);
+        const t = el ? (el.innerText || '') : '';
+        if (t.trim().length > 200) return t;
+    }
+    return document.body ? (document.body.innerText || '') : '';
+}
+"""
+
+
 def _extract_body_text(page) -> tuple:
-    """提取当前页面标题+正文：优先正文容器（article/main/章节容器），兜底 body 全文。"""
+    """提取当前页面标题+正文：优先正文容器（article/main/章节容器），兜底 body 全文。
+    v1.24.1 性能修复：旧实现用 page.inner_text(sel) 逐个试选择器——元素不存在时
+    Playwright 隐式等 selector 出现（默认 30s/个）。番茄阅读页全是自定义 div，
+    11 个候选全 miss 时单章空耗 ~330s，351 章的书永远跑不完（压测'挂死'真凶，
+    签名=低 CPU 纯等待零输出）。改单次 JS 求值拿全部候选，一次往返零等待；
+    再套 _eval_bounded 封顶（页面主线程卡死也 8s 内返回）。"""
     title = ""
     try:
         title = (page.title() or "").strip()
     except Exception:
         pass
-    text = ""
-    for sel in ("article", "main", ".content", "#content", ".article-content",
-                "#chapter-content", ".chapter-content", "#txtContent", "body"):
-        try:
-            text = page.inner_text(sel) or ""
-        except Exception:
-            text = ""
-        if len(text.strip()) > 200:
-            break
-    return title, (text or "").strip()
+    text = _eval_bounded(page, _BODY_TEXT_JS, timeout_ms=8000, fallback="") or ""
+    return title, text.strip()
 
 
 
 def _text_route(
     url: str, output_dir: Path, headed: bool = False, safe: bool = False,
     max_chapters: int = 100, allow_chapters: bool = True, stealth: str = "full",
+    cookie_file: str = "", cookies_from_browser: str = "",
+    profile_dir: Optional[Path] = None,
 ) -> Dict:
     """文本专用线：
     1. txt/md/csv 直链 → 委托 files 流式直下（文件本体原样保存）；
-    2. 目录页（≥5 个"第X章/Chapter N"类链接，小说/长教程）→ 逐章抓正文，
-       轻限速合并成单个 txt（含来源/书名/章节数头）；
+    2. 目录页（≥5 个"第X章/Chapter N"类链接，小说/长教程）→ 目录滚动展开拿全
+       章节列表，逐章抓正文，轻限速合并成单个 txt（含来源/书名/章节数头）；
+       max_chapters=0 表示不限章数；正文抓不到的章节做 VIP/锁定信号检测，
+       跳过原因如实记录（skipped_detail/skip_reasons），不假装下全；
     3. 普通文章页 → 滚动触发懒加载后正文提取存 txt。
-    allow_chapters=False 时跳过逐章抓取（chain 兜底用，保持单页快速存正文）。"""
+    allow_chapters=False 时跳过逐章抓取（chain 兜底用，保持单页快速存正文）。
+    v1.24.1：登录态支持（cookie_file/--cookies-from-browser/--profile——用自己的
+    账号权限看付费章节是合法路径，无权限章节则如实跳过）；全部等待有界化
+    （_eval_bounded/_close_bounded）；全链分段计时 [stage] 日志。"""
     base = {"mode": "url", "source_url": url, "output_dir": str(output_dir), "method": "text"}
+    _stage_reset()
 
     # 1) 文本文件直链：按文件本体直下（原样字节，不做提取）
+    _stage("text:直链检查")
     if urllib.parse.urlparse(url).path.lower().endswith((".txt", ".md", ".csv")):
         item = _file_direct_download(url, output_dir, safe)
         if item:
@@ -2041,30 +2086,66 @@ def _text_route(
         try:
             with sync_playwright() as p:
                 browser = None
+                context = None
                 try:
-                    browser, context, page, blocked = _open_page(p, headed, safe, stealth)
+                    _stage("text:启动浏览器")
+                    browser, context, page, blocked = _open_page(
+                        p, headed, safe, stealth,
+                        profile_dir=profile_dir,
+                        cookie_file=cookie_file,
+                        cookies_from_browser=cookies_from_browser,
+                        cookie_route_name="text")
                     page.goto(url, wait_until="domcontentloaded", timeout=30000)
                     try:
                         page.wait_for_load_state("networkidle", timeout=10000)
                     except Exception:
                         pass
                     # 落地页穿透：分享壳页先跟进到真实文章/目录页再提取正文
+                    _stage("text:落地页穿透")
                     final_url = _goto_pierce_shell(page, url)
                     if final_url != url:
                         pierced_url = final_url
                     # JS 渲染等待：SPA 文章/目录页正文和章节链接都是 JS 挂载的
+                    _stage("text:渲染等待")
                     _wait_for_render(page)
 
-                    chapters = page.evaluate(CHAPTER_LINKS_JS) or []
+                    _stage("text:目录提取")
+                    chapters = _eval_bounded(page, CHAPTER_LINKS_JS, timeout_ms=10000, fallback=[]) or []
                     if allow_chapters and len(chapters) >= 5:
+                        # 目录展开滚动：懒加载/折叠目录先滚到拿全章节列表
+                        _stage(f"text:目录展开（初始 {len(chapters)} 章）")
+                        stable = 0
+                        for i in range(6):
+                            try:
+                                _eval_bounded(page, TOC_EXPAND_JS, timeout_ms=3000, fallback=0)
+                                page.wait_for_timeout(500)
+                            except Exception:
+                                break
+                            grown = _eval_bounded(page, CHAPTER_LINKS_JS, timeout_ms=8000,
+                                                  fallback=chapters) or chapters
+                            if len(grown) > len(chapters):
+                                chapters = grown
+                                stable = 0
+                            else:
+                                stable += 1
+                                if stable >= 2:
+                                    break
+
                         # 目录页：逐章抓正文合并成一个 txt
+                        _stage(f"text:逐章抓取（共 {len(chapters)} 章）")
                         toc_title, _ = _extract_body_text(page)
                         book_name = re.sub(
                             r'[\\/:*?"<>|]+', "_",
                             (toc_title.split("-")[0].strip()[:40] or "novel"),
                         )
                         pieces = []
-                        for ch in chapters[:max_chapters]:
+                        skipped: List[Dict[str, str]] = []
+                        skip_reasons: Dict[str, int] = {}
+                        font_map: Dict[int, str] = {}
+                        font_url_used = ""
+                        todo = chapters[:max_chapters] if max_chapters > 0 else chapters
+                        for idx, ch in enumerate(todo):
+                            _stage(f"text:章 {idx + 1}/{len(todo)} {ch['title'][:24]}")
                             try:
                                 page.goto(ch["url"], wait_until="domcontentloaded", timeout=30000)
                                 try:
@@ -2072,17 +2153,62 @@ def _text_route(
                                 except Exception:
                                     pass
                                 _, body = _extract_body_text(page)
+                                # 字体反爬还原（v1.24.1）：正文含私有区码位时，
+                                # 从页面 @font-face 抓 woff2 字体，字形比对建映射还原。
+                                # 全站字体同一份且映射落盘缓存——只比对一次。
+                                if body and novel_font.has_pua(body) and not font_map:
+                                    _stage("text:检测到字体混淆，构建还原映射")
+                                    try:
+                                        css_texts = page.evaluate(
+                                            "() => { const out = [];"
+                                            " for (const s of document.styleSheets) {"
+                                            "  try { for (const r of s.cssRules) out.push(r.cssText || ''); } catch (e) {}"
+                                            " } return out; }") or []
+                                        for fu in novel_font.extract_font_urls(css_texts):
+                                            try:
+                                                resp = context.request.get(fu, timeout=15000)
+                                                if resp.ok:
+                                                    mp = novel_font.load_or_build_mapping(resp.body())
+                                                    if mp:
+                                                        font_map = mp
+                                                        font_url_used = fu
+                                                        break
+                                            except Exception:
+                                                continue
+                                    except Exception as exc:
+                                        sys.stderr.write(f"[novel-font] 还原映射构建失败（正文原样保存）: {exc}\n")
+                                if font_map and body:
+                                    body = novel_font.translate_text(body, font_map)
                                 if len(body) > 200:
                                     pieces.append(f"{ch['title']}\n\n{body}")
                                     page.wait_for_timeout(400)  # 轻限速，别把站点打挂
-                            except Exception:
-                                continue
+                                else:
+                                    # 正文过短：区分"付费/登录墙"和"渲染失败"，如实记录
+                                    lock = _eval_bounded(page, CHAPTER_LOCK_JS,
+                                                         timeout_ms=4000, fallback="") or ""
+                                    reason = lock if lock else "render-empty"
+                                    skipped.append({"title": ch["title"], "reason": reason})
+                                    skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
+                                    sys.stderr.write(f"[text] 章节跳过: {ch['title'][:40]} → {reason}\n")
+                            except Exception as exc:
+                                skipped.append({"title": ch["title"], "reason": f"error: {str(exc)[:80]}"})
+                                skip_reasons[f"error"] = skip_reasons.get("error", 0) + 1
+                                sys.stderr.write(f"[text] 章节异常: {ch['title'][:40]} → {str(exc)[:80]}\n")
+                            if (idx + 1) % 20 == 0:
+                                _stage(f"text:章节进度 {idx + 1}/{len(todo)}（已收 {len(pieces)}）")
+                        _stage(f"text:逐章完成（收 {len(pieces)} 跳 {len(skipped)}）")
                         if len(pieces) >= 2:
                             output_dir.mkdir(parents=True, exist_ok=True)
                             path = output_dir / f"{book_name}_{int(time.time())}.txt"
+                            if font_map:
+                                toc_title = novel_font.translate_text(toc_title, font_map)
                             content = (
                                 f"来源: {final_url}\n书名: {toc_title}\n"
-                                f"章节: 抓到 {len(pieces)}/{len(chapters)} 章（上限 {max_chapters}）\n"
+                                f"章节: 抓到 {len(pieces)}/{len(chapters)} 章"
+                                f"（本次抓取 {len(todo)} 章，上限 {'不限' if max_chapters == 0 else max_chapters}）\n"
+                                + (f"跳过: {len(skipped)} 章（{', '.join(f'{k}×{v}' for k, v in skip_reasons.items())}）——"
+                                   "无权限章节需用本人账号登录（--cookies-from-browser/--profile）后重试\n"
+                                   if skipped else "")
                                 + "=" * 40 + "\n\n" + "\n\n\n".join(pieces)
                             )
                             path.write_text(content, encoding="utf-8")
@@ -2090,9 +2216,16 @@ def _text_route(
                                 "url": final_url, "path": str(path), "kind": "text",
                                 "size": path.stat().st_size, "title": toc_title,
                                 "chapters_total": len(chapters), "chapters_saved": len(pieces),
+                                "chapters_skipped": len(skipped),
+                                "skip_reasons": skip_reasons,
+                                "skipped_detail": skipped[:20],
                             }
+                            if font_map:
+                                item["font_deobfuscated"] = True
+                                item["font_map_size"] = len(font_map)
                         else:
                             # 章节抓取几乎全失败：回到穿透后的页面滚动后单页保存
+                            _stage("text:逐章几乎全败，退单页保存")
                             page.goto(final_url, wait_until="domcontentloaded", timeout=30000)
                             for _ in range(3):
                                 human_scroll(page, 2000)
@@ -2100,15 +2233,17 @@ def _text_route(
                             item = _save_page_text(page, final_url, output_dir)
                     else:
                         # 普通文章：滚动触发懒加载后单页保存
+                        _stage("text:单页正文提取")
                         for _ in range(3):
                             human_scroll(page, 2000)
                             page.wait_for_timeout(600)
                         item = _save_page_text(page, final_url, output_dir)
                 finally:
-                    if browser is not None:
-                        browser.close()
+                    _stage("text:关闭浏览器")
+                    _close_bounded(page=page, browser=browser, context=context)
         except Exception as exc:
             # 页面打不开/超时：返回错误而不是崩溃，chain 能继续用其他方式
+            _stage(f"text:异常收尾（{str(exc)[:60]}）")
             item = {"error": f"browser error: {exc}"}
 
     if "error" in item:
@@ -2134,6 +2269,8 @@ def _harvest_route(url: str, output_dir: Path, headed: bool, safe: bool,
                    profile_dir: Optional[Path] = None, stealth: str = "full") -> Dict:
     """harvest 路线（自 auto_save_url 内联块原样提出，零逻辑改动）：
     DOM/元数据/JSON 收割 + 页面上下文下载，快（无长等待），适合照片/音频。"""
+    _stage_reset()
+    _stage("harvest:开始")
     saved: List[Dict] = []
     seen: set = set()
     harvest_error = None
@@ -2192,10 +2329,7 @@ def _harvest_route(url: str, output_dir: Path, headed: bool, safe: bool,
                                                       allowed_kinds, seen, save_junk, safe=safe)
                             followed_redirect = real_target
                 finally:
-                    if browser is not None:
-                        browser.close()
-                    elif context is not None:
-                        context.close()  # 持久化上下文：close 才把 cookie/缓存刷进用户目录
+                    _close_bounded(page=page, browser=browser, context=context)  # 持久化上下文：close 才把 cookie/缓存刷进用户目录
         except Exception as exc:
             # 页面打不开/超时：返回错误而不是崩溃，chain 能继续用其他方式
             harvest_error = f"browser error: {exc}"
@@ -2242,6 +2376,8 @@ def _browser_route(url: str, output_dir: Path, wait_seconds: int, method: str,
     wait 自适应，只抓到封面时自动降级 yt-dlp。
     ytdlp_fallback=False：chain 内调用专用——chain 已有独立 ytdlp 步与链尾 cookie 复试，
     内部再降级会让 yt-dlp 整链跑 3 次（压测实测），且 attempts 错误被 yt-dlp 文本顶替。"""
+    _stage_reset()
+    _stage(f"browser({method}):开始")
     saved: List[Dict] = []
     seen: set = set()
     body_hashes: set = set()  # 内容指纹：同文件重复响应（字节相同）去重（两种模式都开）
@@ -2552,10 +2688,7 @@ def _browser_route(url: str, output_dir: Path, wait_seconds: int, method: str,
                 _rp = cleanup_info["removed_paths"]
                 saved = [i for i in saved if i.get("path") not in _rp]
         finally:
-            if browser is not None:
-                browser.close()
-            elif context is not None:
-                context.close()  # 持久化上下文：close 才把 cookie/缓存刷进用户目录
+            _close_bounded(page=page, browser=browser, context=context)  # 持久化上下文：close 才把 cookie/缓存刷进用户目录
 
     if saved:
         has_media = _has_video_or_audio(saved)

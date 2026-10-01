@@ -27,20 +27,29 @@ Own Search Engine — 真正的“自己的搜索引擎”（本地独立索引�
     # 在自己索引里搜索
     python own_search.py search --query "OpenClaw" --json
 
+    # 局域网搜索：发现局域网设备/服务/共享并入索引（只读探测，限私网段）
+    python own_search.py lan
+    python own_search.py lan --hosts 192.168.31.1 --json
+    python own_search.py search --query "路由器"
+
     # 下载视频/音频/图片（嵌套自动保存浏览器）
     python own_search.py download --url "https://v.douyin.com/xxxx"
     python own_search.py download --query "抖音 猫 视频"
 """
 
 import argparse
+import ipaddress
 import json
 import re
+import socket
 import sqlite3
+import ssl
 import subprocess
 import sys
 import time
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Dict, List
@@ -406,6 +415,195 @@ def cmd_stats(args):
     return 0
 
 
+# ---- 局域网搜索（v1.25.0 新增）：发现局域网设备/服务/共享并纳入本地索引 ----
+# 设计边界（安全第一，全部只读探测）：
+# 1. 只扫 RFC1918 私网段（10./172.16-31./192.168.），非私网直接拒绝——杜绝误扫公网；
+# 2. 只做无副作用探测：TCP connect 探端口、HTTP GET 拿标题/Server 头、
+#    FTP 读 220 banner、SMB 用 `net view` 列共享名（Windows 自带只读枚举）；
+# 3. 不尝试任何登录/写入/利用，发现的资源入 own_search 索引（source="lan"），
+#    之后用 `search` 子命令即可搜到（与公网页面同一套索引与排序）。
+# 纯 stdlib（socket/subprocess/ipaddress），与项目零依赖风格一致。
+
+# 常见服务端口 → (协议, 服务名)。命中即按协议做对应识别。
+LAN_PORT_TABLE = {
+    80: ("http", "HTTP"), 443: ("https", "HTTPS"),
+    8080: ("http", "HTTP-Alt"), 8000: ("http", "HTTP-Dev"),
+    8081: ("http", "HTTP-Alt2"), 5000: ("http", "NAS/Synology"),
+    32400: ("http", "Plex"), 8096: ("http", "Jellyfin"),
+    9200: ("http", "Elasticsearch"), 8384: ("http", "Syncthing"),
+    445: ("smb", "SMB"), 21: ("ftp", "FTP"),
+}
+
+
+def _local_ip() -> str:
+    """本机出口 IP（UDP connect 技巧，不发任何包）。拿不到返回空。"""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("192.168.255.255", 1))  # 目标不可达也无妨，只为拿路由出口
+        return s.getsockname()[0]
+    except OSError:
+        return ""
+    finally:
+        s.close()
+
+
+def _tcp_probe(host: str, port: int, timeout: float) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def _http_identify(scheme: str, host: str, port: int, timeout: float) -> Dict[str, str]:
+    """GET 首页拿 <title> + Server 头（自签 HTTPS 容忍；失败返回空标记）。"""
+    url = f"{scheme}://{host}:{port}/" if port not in (80, 443) else f"{scheme}://{host}/"
+    info = {"url": url, "title": "", "server": ""}
+    try:
+        ctx = ssl._create_unverified_context() if scheme == "https" else None
+        req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT,
+                                                   "Connection": "close"})
+        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+            body = resp.read(65536).decode("utf-8", "ignore")
+            m = re.search(r"<title[^>]*>(.*?)</title>", body, re.S | re.I)
+            info["title"] = re.sub(r"\s+", " ", m.group(1)).strip()[:120] if m else ""
+            info["server"] = (resp.headers.get("Server") or "")[:60]
+    except Exception as exc:
+        info["error"] = str(exc)[:60]
+    return info
+
+
+def _smb_shares(host: str, timeout: float = 8.0) -> List[str]:
+    """Windows `net view` 只读枚举 SMB 共享名（不登录不写）。非 Windows/失败返回空。"""
+    if sys.platform != "win32":
+        return []
+    try:
+        # net view 输出跟随系统 locale（中文 Windows=GBK），text=True 默认 locale 解码正确；
+        # 不按项目 ffmpeg 的 utf-8 规则来——那是给 ffmpeg 的，net 工具是 GBK 输出
+        r = subprocess.run(["net", "view", f"\\\\{host}"], capture_output=True,
+                           text=True, timeout=timeout)
+        lines = r.stdout.splitlines()
+        out, in_table = [], False
+        for line in lines:
+            if set(line.strip()) <= {"-"} and line.strip():
+                in_table = True
+                continue
+            if in_table:
+                if "命令成功完成" in line or "successfully" in line.lower():
+                    break
+                name = line.split()[0] if line.split() else ""
+                if name and not name.startswith("\\\\"):
+                    out.append(name)
+        return out[:20]
+    except Exception:
+        return []
+
+
+def _ftp_banner(host: str, port: int, timeout: float) -> str:
+    try:
+        with socket.create_connection((host, port), timeout=timeout) as s:
+            s.settimeout(timeout)
+            data = s.recv(128)
+            return data.decode("utf-8", "ignore").strip()[:80]
+    except OSError:
+        return ""
+
+
+def cmd_lan(args) -> int:
+    """lan 子命令：扫描局域网 → 识别服务 → 入索引（source="lan"）。"""
+    local_ip = _local_ip()
+    if not local_ip:
+        print(json.dumps({"error": "无法获取本机出口 IP（无网络接口？）"}, ensure_ascii=False))
+        return 1
+    try:
+        net = ipaddress.ip_network(f"{local_ip}/24", strict=False)
+    except ValueError:
+        print(json.dumps({"error": f"IP 解析失败: {local_ip}"}, ensure_ascii=False))
+        return 1
+    if not net.is_private:
+        print(json.dumps({
+            "error": f"出口网段 {net} 不是私网（RFC1918），拒绝扫描——本工具只允许扫局域网",
+            "local_ip": local_ip}, ensure_ascii=False))
+        return 1
+
+    ports = sorted({int(p) for p in re.split(r"[,，]", args.ports) if p.strip().isdigit()
+                    and int(p) in LAN_PORT_TABLE} or set(LAN_PORT_TABLE))
+    hosts = [str(h) for h in net.hosts()]
+    if args.hosts:
+        hosts = [h.strip() for h in re.split(r"[,，]", args.hosts) if h.strip()]
+
+    t0 = time.time()
+    sys.stderr.write(f"[lan] 扫描 {net} 的 {len(hosts)} 主机 × {len(ports)} 端口"
+                     f"（超时 {args.scan_timeout}s，只读探测）\n")
+    # 端口扫描并发 128：254×12 任务 0.3s 超时，实测 ~5-10s
+    tasks = [(h, p) for h in hosts for p in ports]
+    with ThreadPoolExecutor(max_workers=128) as ex:
+        results = list(ex.map(lambda hp: _tcp_probe(hp[0], hp[1], args.scan_timeout), tasks))
+    alive = {tp for tp, ok in zip(tasks, results) if ok}
+    by_host: Dict[str, List[int]] = {}
+    for h, p in alive:
+        by_host.setdefault(h, []).append(p)
+
+    findings: List[Dict] = []
+    for host, plist in sorted(by_host.items()):
+        for p in plist:
+            proto, name = LAN_PORT_TABLE[p]
+            item = {"host": host, "port": p, "service": name}
+            # v1.25.0 自查修正：https 曾落进 else 被当 FTP（实测 443 打出 ftp:// URL）
+            if proto in ("http", "https"):
+                ident = _http_identify(proto, host, p, args.http_timeout)
+                item.update(scheme=proto, title=ident.get("title", ""),
+                            server=ident.get("server", ""), url=ident["url"])
+            elif proto == "smb":
+                shares = _smb_shares(host)
+                item.update(scheme="smb", shares=shares)
+                for sh in shares:
+                    findings.append({"host": host, "port": p, "service": "SMB共享",
+                                     "scheme": "smb", "url": f"smb://{host}/{sh}",
+                                     "title": f"{host} 共享 {sh}", "server": ""})
+            else:  # ftp
+                item.update(scheme="ftp", banner=_ftp_banner(host, p, args.http_timeout),
+                            url=f"ftp://{host}:{p}/")
+            findings.append(item)
+
+    # 入索引（--no-index 只报告不入库）
+    indexed = 0
+    if not args.no_index:
+        conn = get_db()
+        for f in findings:
+            if not f.get("url"):
+                continue
+            text_parts = [f.get("title", ""), f.get("server", ""), f.get("banner", "")]
+            text_parts += [f"共享 {s}" for s in f.get("shares", [])]
+            text = " ".join(t for t in text_parts if t) or f["service"]
+            add_page(conn, f["url"], f.get("title") or f["url"], text, source="lan")
+            indexed += 1
+        conn.close()
+
+    out = {
+        "network": str(net), "local_ip": local_ip,
+        "hosts_scanned": len(hosts), "ports_per_host": len(ports),
+        "elapsed": round(time.time() - t0, 1),
+        "services_found": len(findings), "indexed": indexed,
+        "findings": findings,
+        "note": "发现结果已入本地索引（source=lan），用 `search --query` 即可搜；"
+                "全部为只读探测，不含登录/写入操作",
+    }
+    if args.json:
+        print(json.dumps(out, ensure_ascii=False, indent=2))
+    else:
+        print(f"网段 {net}（本机 {local_ip}）：{len(hosts)} 主机 × {len(ports)} 端口，"
+              f"耗时 {out['elapsed']}s，发现 {len(findings)} 个服务，入索引 {indexed} 条")
+        for f in findings:
+            extra = (f" 标题={f['title']}" if f.get("title")
+                     else f" 共享={','.join(f.get('shares', []))}" if f.get("shares")
+                     else f" banner={f.get('banner', '')}" if f.get("banner") else "")
+            print(f"  [{f['service']}] {f.get('url', f['host'] + ':' + str(f['port']))}{extra}")
+        if not findings:
+            print("  （未发现开放服务——设备可能全在休眠/防火墙拦截/网段选错）")
+    return 0
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Own Search Engine - 本地独立索引搜索引擎")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -452,6 +650,15 @@ def main(argv=None):
 
     p_stats = sub.add_parser("stats", help="查看索引统计")
     p_stats.set_defaults(func=cmd_stats)
+
+    p_lan = sub.add_parser("lan", help="局域网搜索：发现设备/服务/共享并入本地索引（只读探测，限私网段）")
+    p_lan.add_argument("--ports", default="", help="逗号分隔的端口列表（默认全部内置常见服务端口：80,443,8080,8000,8081,5000,32400,8096,9200,8384,445,21）")
+    p_lan.add_argument("--hosts", default="", help="只扫指定主机（逗号分隔 IP，默认扫整个 /24 网段）")
+    p_lan.add_argument("--scan-timeout", type=float, default=0.3, help="端口探测超时秒数（默认 0.3）")
+    p_lan.add_argument("--http-timeout", type=float, default=3.0, help="HTTP/FTP 识别超时秒数（默认 3）")
+    p_lan.add_argument("--no-index", action="store_true", help="只报告发现结果，不入索引")
+    p_lan.add_argument("--json", action="store_true")
+    p_lan.set_defaults(func=cmd_lan)
 
     args = parser.parse_args(argv)
     return args.func(args)

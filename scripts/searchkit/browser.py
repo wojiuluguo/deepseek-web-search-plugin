@@ -64,6 +64,7 @@ from .normalize import (  # noqa: F401
 )
 from .engines import CATEGORY_ENGINES, DOMESTIC_FIRST  # noqa: F401
 from .http import DEFAULT_ENGINES  # noqa: F401
+from .resolve import resolve_shell_urls
 
 __all__ = [
     "ENGINES", "BROWSER_ENGINES", "CATEGORY_ENGINES", "DOMESTIC_FIRST", "DEFAULT_ENGINES",
@@ -158,8 +159,16 @@ def _parse_proxy(proxy: str):
     return info
 
 
+def _conn_dead(exc: Exception) -> bool:
+    """连接层死亡判定（driver/浏览器进程或管道已断）：命中即停止后续引擎。"""
+    s = str(exc).lower()
+    marks = ("connection closed", "target closed", "target page, context or browser",
+             "browser has been closed", "pipe closed", "driver closed")
+    return any(m in s for m in marks)
+
+
 def run_search(query: str, max_results: int, engines: List[str], proxy: str = "", safe: bool = False,
-               stealth: str = "full") -> Dict:
+               stealth: str = "full", resolve_shells: bool = True) -> Dict:
     if not _HAS_PLAYWRIGHT:
         hint = "playwright 未安装: pip install playwright && python -m playwright install chromium"
         return {"query": query, "results": [], "engine_errors": {"playwright": hint}, "browser": "unavailable"}
@@ -170,6 +179,7 @@ def run_search(query: str, max_results: int, engines: List[str], proxy: str = ""
 
     with sync_playwright() as p:
         browser = None
+        page = None
         try:
             browser = p.chromium.launch(
                 headless=True,
@@ -196,10 +206,22 @@ def run_search(query: str, max_results: int, engines: List[str], proxy: str = ""
             # 安全模式：请求拦截 + 弹窗全关（复用 auto_save_browser 的安全基建）
             safe_blocked = _SETUP_SAFE_MODE(context, page) if safe else {}
 
+            browser_dead = False
             for engine in engines:
                 fn = BROWSER_ENGINES.get(engine)
                 if not fn:
                     errors[engine] = "unsupported engine"
+                    continue
+                # v1.25.0 压测修复（问题 #2）：浏览器/管道死亡后同一 page 上后续引擎
+                # 必然连环失败且白等超时。每引擎前查连接状态，断开则如实标记快速失败，
+                # 不再逐个吃满 goto 超时（真正恢复靠上层子进程超时+重试，本层不做
+                # 进程内重启——sync API 线程绑定，driver 突死后任何调用都可能永久挂起，
+                # 压测 F2 实测：driver 杀掉后 page.goto 挂死 + python 空转烧 CPU）。
+                if not browser.is_connected():
+                    browser_dead = True
+                if browser_dead:
+                    errors[engine] = "browser/driver dead (skipped)"
+                    stats[engine] = 0
                     continue
                 try:
                     results = fn(page, query, fetch_limit)
@@ -213,12 +235,31 @@ def run_search(query: str, max_results: int, engines: List[str], proxy: str = ""
                     stats[engine] = 0
                     errors[engine] = str(exc)
                     sys.stderr.write(f"[{engine}] error: {exc}\n")
-                # Human-like pause between engines.
-                time.sleep(random.uniform(0.5, 1.2))
+                    if _conn_dead(exc):
+                        browser_dead = True
+                        continue
+                # Human-like pause between engines（空手引擎免停——压测实测 n=0
+                # 引擎白等 11-21s，再睡 0.8-1.5s 纯浪费）
+                if stats.get(engine):
+                    time.sleep(random.uniform(0.5, 1.2))
         finally:
-            if browser is not None:
-                browser.close()
+            # 有界关闭（与下载线同款：page→browser 两级，长连页面不再阻塞）
+            try:
+                from auto_save.browser_base import _close_bounded as _CLOSE_BOUNDED
+                _CLOSE_BOUNDED(page=page, browser=browser)
+            except Exception:
+                try:
+                    if browser is not None:
+                        browser.close()
+                except Exception:
+                    pass
 
+    # v1.25.0 P1：壳解码后再去重（真实 URL 才能跨引擎去重）
+    if resolve_shells:
+        try:
+            all_results = resolve_shell_urls(all_results)
+        except Exception:
+            pass
     results = _dedupe(all_results)[:max_results * 3]
     out = {
         "query": query,

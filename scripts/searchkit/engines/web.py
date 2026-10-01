@@ -1,8 +1,11 @@
-"""通用网页引擎：ddg/bing/sogou/so360/baidu/维基/雅虎财经（v1.22.0 批 C 自 search.py 搬迁，零逻辑改动）。
+"""通用网页引擎：ddg/bing/sogou/so360/baidu/维基/雅虎财经（v1.22.0 批 C 自 search.py 搬迁）。
+v1.25.0 压测优化：HTML 引擎 _fetch 后 check_captcha——搜狗匿名请求实测返回验证码页，
+如实抛 CaptchaError 而非笼统 "no results"（引擎健康度可诊断）。
 依赖 searchkit.http 的公共请求件；注册表在 engines/__init__.py。"""
 from typing import Dict, List
 
-from ..http import DEFAULT_USER_AGENT, _clean_html, _fetch, _post_json, _result
+from ..http import (DEFAULT_USER_AGENT, _clean_html, _fetch,
+                    _post_json, _result, check_captcha)
 from ..normalize import _normalize_url
 
 import html
@@ -15,6 +18,7 @@ def search_ddg(query: str, max_results: int, timeout: int) -> List[Dict[str, str
     """DuckDuckGo Lite: key-free, usually accessible from many regions."""
     url = "https://lite.duckduckgo.com/lite/?q=" + urllib.parse.quote(query)
     page = _fetch(url, timeout=timeout)
+    check_captcha(page)
     results: List[Dict[str, str]] = []
     # DDG Lite result links look like: <a rel="nofollow" href="URL" class="result-link">Title</a>
     # Match any anchor and keep only ones that carry the result-link marker.
@@ -43,6 +47,7 @@ def search_bing(query: str, max_results: int, timeout: int) -> List[Dict[str, st
     """Bing HTML results."""
     url = "https://www.bing.com/search?q=" + urllib.parse.quote(query) + "&setlang=zh-hans&cc=CN"
     page = _fetch(url, timeout=timeout)
+    check_captcha(page)
     results: List[Dict[str, str]] = []
     blocks = re.findall(r'<li class="b_algo".*?</li>', page, re.S | re.I)
     for block in blocks:
@@ -69,6 +74,7 @@ def search_sogou(query: str, max_results: int, timeout: int) -> List[Dict[str, s
     """Sogou HTML results."""
     url = "https://www.sogou.com/web?query=" + urllib.parse.quote(query)
     page = _fetch(url, timeout=timeout)
+    check_captcha(page)
     results: List[Dict[str, str]] = []
     # Sogou titles are usually <h3 ...><a ...>Title</a></h3>
     for m in re.finditer(r"<h3[^>]*>\s*<a[^>]+href=\"([^\"]+)\"[^>]*>(.*?)</a>", page, re.S | re.I):
@@ -94,6 +100,7 @@ def search_so360(query: str, max_results: int, timeout: int) -> List[Dict[str, s
     """360 Search (so.com) HTML results."""
     url = "https://www.so.com/s?q=" + urllib.parse.quote(query)
     page = _fetch(url, timeout=timeout)
+    check_captcha(page)
     results: List[Dict[str, str]] = []
     for m in re.finditer(r"<h3[^>]*>\s*<a[^>]+href=\"([^\"]+)\"[^>]*>(.*?)</a>", page, re.S | re.I):
         href = html.unescape(m.group(1))
@@ -117,6 +124,7 @@ def search_baidu(query: str, max_results: int, timeout: int) -> List[Dict[str, s
     """Baidu HTML search (may hit captcha; kept as an extra domestic engine)."""
     url = "https://www.baidu.com/s?wd=" + urllib.parse.quote(query)
     page = _fetch(url, timeout=timeout)
+    check_captcha(page)
     results: List[Dict[str, str]] = []
     blocks = re.findall(
         r'<div[^>]+class="[^"]*(?:result|c-container)[^"]*".*?</div>',

@@ -23,3 +23,15 @@ dist/
 
 # 废案（历史实验代码，只留本地参考，不入库）
 废案/
+
+# 衍生项目（独立仓库，不入本仓库）
+search-api-service/
+
+# 压测/临时产物（只留本地）
+downloads/*
+!downloads/cache/
+downloads/cache/*
+!downloads/cache/.gitkeep
+index/
+.zcode/
+_probe_*.py

@@ -21,6 +21,7 @@ __all__ = [
     "_setup_safe_mode", "_browser_launch_args", "_apply_stealth", "_save_bytes",
     "_wait_for_render", "_open_page",
     "set_proxy", "get_proxy", "_proxy_urlopen",
+    "_stage_reset", "_stage", "_eval_bounded", "_close_bounded",
 ]
 
 # ---- 代理（v1.23.0）：模块级状态，全链一处设置处处生效 ----
@@ -334,28 +335,94 @@ def _save_bytes(data: bytes, output_dir: Path, url: str, content_type: str, inde
     return path
 
 
+# ---- 挂死根治三件套（v1.24.1）：分段计时 / 有界 evaluate / 有界 close ----
+# 背景（问题清单 v1.24.0 #1）：网易云歌曲页/番茄书页采集挂死，低 CPU 纯等待零输出
+# >10 分钟。根因=无界等待点：page.evaluate 无 timeout 参数（页面主线程被长任务
+# 占死时永久挂起）、browser/context.close() 无超时（长连页面 WebSocket/SSE 阻塞）。
+# _stage 让"挂点在哪个步"从此一条日志可见；_eval_bounded/_close_bounded 把两类
+# 无界点全部封顶，挂死从"永久"降级为"最多等 N 秒"。
+
+_STAGE_LAST = {"t": None}
+
+
+def _stage_reset() -> None:
+    _STAGE_LAST["t"] = None
+
+
+def _stage(name: str) -> None:
+    """分段计时日志：打印自上一阶段以来的耗时（首阶段打 start）。
+    挂死诊断入口——stderr 最后一条 [stage] 就是挂点。"""
+    now = time.time()
+    prev = _STAGE_LAST["t"]
+    _STAGE_LAST["t"] = now
+    if prev is None:
+        sys.stderr.write(f"[stage] {name} start\n")
+    else:
+        sys.stderr.write(f"[stage] {name} (+{now - prev:.1f}s)\n")
+    sys.stderr.flush()
+
+
+def _eval_bounded(page, js: str, timeout_ms: int = 8000, fallback=None):
+    """有界 evaluate：page.evaluate 没有 timeout 参数，页面主线程一旦被长任务
+    占死（番茄/网易云这类重 JS 页）调用即永久挂起。改走 wait_for_function——
+    超时由 driver（Node 侧）强制执行，页面卡死也照样准点抛 TimeoutError。
+    幂等纯函数型 JS 才适用（每轮轮询会重复执行）；空数组在 JS 里为真值，
+    返回数组的表达式首轮即返回，行为与 evaluate 等价。"""
+    try:
+        handle = page.wait_for_function(js, timeout=timeout_ms)
+        try:
+            return handle.json_value()
+        finally:
+            try:
+                handle.dispose()
+            except Exception:
+                pass
+    except Exception:
+        return fallback
+
+
+def _close_bounded(page=None, browser=None, context=None) -> None:
+    """有界浏览器关闭（v1.24.1 实测定型）：browser.close() 对挂着长连
+    （WebSocket/SSE）页面的会话可能无限阻塞——番茄章节页实测复现。
+    实测主线程三级顺序关闭 page.close() → context.close() → browser.close()
+    全部零阻塞（页面先死，长连随页面消亡，browser.close() 0.7s 返回），
+    故废弃线程方案（sync API 线程绑定，跨线程调用直接 greenlet 报错）。
+    每级独立 try/except：前级失败不影响后级兜底。持久化上下文（browser=None）
+    close 才把 cookie/缓存刷进用户目录。"""
+    if page is not None:
+        try:
+            page.close()
+        except Exception:
+            pass
+    target = browser if browser is not None else context
+    if target is None:
+        return
+    try:
+        target.close()
+    except Exception:
+        pass
+
+
 def _wait_for_render(page, min_text: int = 50, max_wait_sec: float = 10.0) -> bool:
     """JS 渲染页自适应等待：SPA 在 domcontentloaded 后内容可能还没挂载（空页面），
     直接收割/提取只能拿到空白。轮询到页面真的渲染出东西为止：
     - 正文 ≥ min_text 字符，或媒体元素 ≥3 个（图库/播放器页正文少）即认为就绪；
     - 每轮 800ms 并滚动触发懒加载；静态页首轮即通过，零额外耗时；
-    - 超时返回 False（真空白页），调用方按原逻辑继续（退 chain 兜底/如实报错）。"""
+    - 超时返回 False（真空白页），调用方按原逻辑继续（退 chain 兜底/如实报错）。
+    v1.24.1：evaluate 换 _eval_bounded——否则轮询循环里任何一个 evaluate 挂住，
+    外层的 deadline 判断永远走不到，有界等待变无界。"""
     deadline = time.time() + max_wait_sec
     while time.time() < deadline:
-        try:
-            n = page.evaluate(
-                "() => document.body ? (document.body.innerText || '').trim().length : 0"
-            ) or 0
-        except Exception:
-            n = 0
+        n = _eval_bounded(
+            page,
+            "() => document.body ? (document.body.innerText || '').trim().length : 0",
+            timeout_ms=3000, fallback=0) or 0
         if n >= min_text:
             return True
-        try:
-            media = page.evaluate(
-                "() => document.querySelectorAll('img,video,audio,source').length"
-            ) or 0
-        except Exception:
-            media = 0
+        media = _eval_bounded(
+            page,
+            "() => document.querySelectorAll('img,video,audio,source').length",
+            timeout_ms=3000, fallback=0) or 0
         if media >= 3:
             return True
         try:

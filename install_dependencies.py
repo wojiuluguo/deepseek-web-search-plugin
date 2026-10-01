@@ -22,6 +22,11 @@ REQUIRED_PACKAGES = {
     "playwright": "playwright>=1.40.0",
     "yt_dlp": "yt-dlp>=2024.0.0",
     "playwright_stealth": "playwright-stealth>=1.0.0",  # 全套伪装（--stealth full 默认）
+    # 小说站字体反爬还原（v1.24.1，text 电路自动使用；缺失时优雅降级为原样保存）
+    "fontTools": "fonttools>=4.40.0",
+    "brotli": "brotli>=1.1.0",
+    "PIL": "pillow>=10.0.0",
+    "numpy": "numpy>=1.24.0",
 }
 
 

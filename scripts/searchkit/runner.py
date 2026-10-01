@@ -55,6 +55,8 @@ def run_search_cli(
     site: str = "",
     safe: bool = False,
     timeout: Optional[int] = None,
+    proxy: str = "",
+    resolve_shells: bool = True,
 ) -> Dict:
     """跑一次底层搜索 CLI（search.py 轻量版 / search_browser.py 浏览器版）。
 
@@ -89,6 +91,11 @@ def run_search_cli(
         cmd += ["--precision", str(precision)]
     if site:
         cmd += ["--site", site]
+    # v1.25.0：proxy 透传（浏览器版 --proxy 原生支持）；resolve_shells 默认开
+    if browser and proxy:
+        cmd += ["--proxy", proxy]
+    if not resolve_shells:
+        cmd.append("--no-resolve")
     if engines_csv:
         cmd += ["--engines", engines_csv]
     elif category:

@@ -35,16 +35,24 @@ def _safe_attr(locator, name: str) -> str:
         return ""
 
 
-def _extract_from_items(page, items, title_sel: str, snippet_sel: str, source: str, max_results: int) -> List[Dict[str, str]]:
-    """Extract results from a Playwright locator collection."""
+def _extract_from_items(page, items, title_sel: str, snippet_sel: str, source: str, max_results: int,
+                        url_sel: str = "") -> List[Dict[str, str]]:
+    """Extract results from a Playwright locator collection.
+    v1.25.0 普查修复：新增可选 url_sel——部分站点标题元素不带链接（arxiv 的
+    <p class="title"> 是纯文本，链接在 p.list-title a），旧逻辑要求标题元素
+    自带 href，导致这类引擎从上线起抓空。提供 url_sel 时标题/URL 分开取。"""
     results = []
     count = items.count()
     for i in range(min(count, max_results)):
         try:
             item = items.nth(i)
             title_el = item.locator(title_sel).first
-            raw_url = _safe_attr(title_el, "href")
-            title = _safe_text(title_el)
+            if url_sel:
+                raw_url = _safe_attr(item.locator(url_sel).first, "href")
+                title = _safe_text(title_el)
+            else:
+                raw_url = _safe_attr(title_el, "href")
+                title = _safe_text(title_el)
             if not title or not raw_url:
                 continue
             if raw_url.startswith("//"):

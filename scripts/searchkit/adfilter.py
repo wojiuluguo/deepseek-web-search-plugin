@@ -99,13 +99,22 @@ def _filter_results(results: List[Dict[str, str]], level: str = "medium") -> Lis
 
 
 def _filter_site(results: List[Dict[str, str]], site: str) -> List[Dict[str, str]]:
+    """--site 域名过滤。
+    v1.25.0 普查修复：旧实现 `site in netloc` 子串匹配——--site python.org 会
+    放行 notpython.org.evil.com / xpython.org（实测用例实锤），恶意第三方域可
+    借子串混进限定结果。改为 host 后缀匹配：host 等于 site 或以 .site 结尾，
+    www. 前缀归一后同样命中。"""
     if not site:
         return results
     site = site.lower().lstrip(".").rstrip("/")
-    return [
-        r for r in results
-        if site in urllib.parse.urlparse(r.get("url", "")).netloc.lower()
-    ]
+
+    def _host_ok(netloc: str) -> bool:
+        host = netloc.lower().split(":")[0]
+        if host.startswith("www."):
+            host = host[4:]
+        return host == site or host.endswith("." + site)
+
+    return [r for r in results if _host_ok(urllib.parse.urlparse(r.get("url", "")).netloc)]
 
 
 def _query_terms(query: str) -> List[str]:

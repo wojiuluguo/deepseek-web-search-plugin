@@ -51,17 +51,21 @@ def search_so360(page, query: str, max_results: int) -> List[Dict[str, str]]:
 
 def search_eastmoney(page, query: str, max_results: int) -> List[Dict[str, str]]:
     """东方财富站内搜索：专业财经内容，无竞价广告（finance 意图的主力引擎，
-    思路来自意图路由——能判出词性的查询直接用专业站，从源头绕开广告引擎）。"""
+    思路来自意图路由——能判出词性的查询直接用专业站，从源头绕开广告引擎）。
+    v1.25.0 普查修复：真实容器是 div.news_item（下划线），旧选择器 .news-item
+    （连字符）从上线起匹配 0 个——DOM 实测 2026-09（div.news_item > .news_item_t
+    标题 / .news_item_c 摘要 / span.news_item_time 时间）。"""
     url = "https://so.eastmoney.com/news/s?keyword=" + urllib.parse.quote(query)
     page.goto(url, wait_until="domcontentloaded", timeout=25000)
     try:
-        page.wait_for_selector(".news-item, .item, .news_list li", timeout=10000)
+        page.wait_for_selector(".news_item, .news-item, .item, .news_list li", timeout=10000)
     except Exception:
         pass
     time.sleep(random.uniform(0.8, 1.5))
     # 防御式多候选容器：东财改版频繁，标准容器拿不到就退回全部 h3/标题链接
-    items = page.locator(".news-item, .item")
-    results = _extract_from_items(page, items, "a", "p, .content, .des", "东方财富", max_results)
+    items = page.locator(".news_item, .news-item, .item")
+    results = _extract_from_items(page, items, ".news_item_t a, h3 a, a",
+                                  ".news_item_c, p, .content, .des", "东方财富", max_results)
     if results:
         return results
     fallback_items = page.locator(".news_list li, div[class*='news'] a")

@@ -321,23 +321,27 @@ def _search_first_media_url(
     """搜索并按媒体类型挑目标。
     video：原两级引擎逻辑（国内优先→通用兜底），行为不变；
     image：结果里没图片类链接时直奔百度图片搜索页（不再误开视频页）；
-    audio：没挑到就换关键词(+mp3)重搜一次，再没有如实返回空。"""
-    # 惰性 import（v1.22.0 结构优化批 1：直连 searchkit.browser，不经 search_browser
-    # 门面——与模式审计 P14 分层修复同向；被调用才拉起，--help 场景零开销）。
-    # scripts/ 目录已在 sys.path（本包 auto_save 即位于其下）。
-    from searchkit.browser import run_search
+    audio：没挑到就换关键词(+mp3)重搜一次，再没有如实返回空。
+    v1.25.0 压测修复（P4 子进程隔离）：搜索步从进程内直调 searchkit.browser.run_search
+    改走 runner.run_search_cli 子进程——压测 F2 实测 driver 突死后进程内调用会
+    永久挂起并空转烧 CPU（无任何超时兜底），子进程隔离后超时有界（auto_timeout），
+    崩溃/挂死不再波及下载宿主进程。"""
+    from searchkit.runner import run_search_cli
 
     # 国内优先：与 search_browser.DOMESTIC_FIRST 同口径（搜狗/360/百度/必应，不含 DDG 防超时）。
     domestic = ["sogou", "so360", "baidu", "bing"]
 
+    def _br_search(engines_list, q=None):
+        env = run_search_cli(q or query, browser=True, engines=engines_list,
+                             max_results=max_results, proxy=get_proxy(), safe=safe)
+        return env.get("data") or {}
+
     if media_type == "video":
-        data = run_search(query, max_results, domestic, proxy=get_proxy(), safe=safe)
+        data = _br_search(domestic)
         url = _pick_media_url(data.get("results", []), query, "video")
         if not url:
-            # 国内引擎没找到时再退回通用引擎组合。
             from searchkit.browser import _resolve_engines
-            data = run_search(query, max_results, _resolve_engines("", "general"),
-                              proxy=get_proxy(), safe=safe)
+            data = _br_search(_resolve_engines("", "general"))
             url = _pick_media_url(data.get("results", []), query, "video")
         if url:
             # 引擎索引的平台搜索页只带残缺关键词（如只"抖音"二字，压测实测），
@@ -355,7 +359,7 @@ def _search_first_media_url(
         return _platform_search_url(query)
 
     if media_type == "image":
-        data = run_search(query, max_results, domestic, proxy=get_proxy(), safe=safe)
+        data = _br_search(domestic)
         url = _pick_media_url(data.get("results", []), query, "image")
         if url:
             return url
@@ -365,7 +369,7 @@ def _search_first_media_url(
     if media_type == "file":
         # 文件电路：先原词挑文件直链，挑不到换"关键词 下载"重搜一次
         for q in (query, f"{query} 下载"):
-            data = run_search(q, max_results, domestic, proxy=get_proxy(), safe=safe)
+            data = _br_search(domestic, q)
             url = _pick_media_url(data.get("results", []), query, "file")
             if url:
                 return url
@@ -373,13 +377,13 @@ def _search_first_media_url(
 
     if media_type == "text":
         # 文本电路：挑第一个非视频站的结果（文章页优先，跳过视频站和跳转壳）
-        data = run_search(query, max_results, domestic, proxy=get_proxy(), safe=safe)
+        data = _br_search(domestic)
         url = _pick_media_url(data.get("results", []), query, "text")
         return url
 
     # audio：先按原词挑，挑不到换 "关键词 mp3" 重搜（只认音乐站/音频直链）
     for q in (query, f"{query} mp3"):
-        data = run_search(q, max_results, domestic, safe=safe)
+        data = _br_search(domestic, q)
         url = _pick_media_url(data.get("results", []), query, "audio")
         if url:
             return url
