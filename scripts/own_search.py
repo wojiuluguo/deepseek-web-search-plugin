@@ -122,7 +122,18 @@ def extract_html(raw: bytes, encoding: str = "utf-8") -> tuple:
     return parser.title.strip(), parser.text()
 
 
+def _require_http_url(url: str) -> None:
+    """v1.25.1 审计修复（质疑②·高·安全）：URL scheme 白名单。
+    stdlib urlopen 原生支持 file://（读本地文件）/ftp:// 等——此前
+    `crawl --url file:///C:/windows/win.ini` 会把本地文件读进索引。
+    本工具只爬万维网页面，非 http(s) 一律拒绝。"""
+    scheme = urllib.parse.urlsplit(url).scheme.lower()
+    if scheme not in ("http", "https"):
+        raise ValueError(f"拒绝非 http(s) URL（防 file:// 等读本地资源）: {url[:120]}")
+
+
 def fetch(url: str, timeout: int = 10):
+    _require_http_url(url)  # v1.25.1：入口白名单（crawl/add/download 三线共用本函数）
     req = urllib.request.Request(
         url,
         headers={
@@ -141,6 +152,8 @@ def fetch(url: str, timeout: int = 10):
 
 def _fetch_with_playwright(url: str, timeout: int = 15):
     """Playwright fallback for anti-bot sites (e.g. Baidu Baike returns 403 to urllib)."""
+    _require_http_url(url)  # v1.25.1：兜底层同挡（cmd_crawl 的 except 会吞 fetch 的
+    # ValueError 转这里，playwright goto file:// 同样能读本地文件——双保险缺一不可）
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
@@ -224,6 +237,11 @@ def get_db():
 
 
 def add_page(conn, url: str, title: str, text: str, source: str = "manual") -> int:
+    # S2 净化（2026-10-15，BUGS.md 同步）：爬取的网页文本入库前剥离隐形/控制字符
+    # （零宽/双向符/Tag 块可从任意网页进索引再进输出）——库里永远干净，出口零负担
+    from searchkit.sanitize import _clean_line, _CTRL_RE, _INVISIBLE_RE
+    title = _CTRL_RE.sub("", _INVISIBLE_RE.sub("", title or "")).strip()
+    text = "\n".join(_clean_line(l) for l in (text or "").split("\n"))
     cur = conn.execute("SELECT id FROM pages WHERE url = ?", (url,))
     row = cur.fetchone()
     if row:
@@ -530,7 +548,33 @@ def cmd_lan(args) -> int:
                     and int(p) in LAN_PORT_TABLE} or set(LAN_PORT_TABLE))
     hosts = [str(h) for h in net.hosts()]
     if args.hosts:
-        hosts = [h.strip() for h in re.split(r"[,，]", args.hosts) if h.strip()]
+        # v1.25.1 审计修复（质疑②b·高·安全）：--hosts 此前无校验，
+        # `lan --hosts 8.8.8.8` 可绕过上面的 RFC1918 私网护栏去扫公网。
+        # 每个显式主机必须是私网 IP（不解析域名——局域网扫描场景只收 IP）。
+        import ipaddress as _ipa
+        bad = []
+        checked = []
+        for h in (h.strip() for h in re.split(r"[,，]", args.hosts) if h.strip()):
+            try:
+                ip = _ipa.ip_address(h)
+            except ValueError:
+                bad.append(f"{h}（非 IP）")
+                continue
+            if not ip.is_private:
+                bad.append(f"{h}（非私网）")
+                continue
+            checked.append(str(ip))
+        if bad:
+            print(json.dumps({
+                "error": f"--hosts 存在越界目标，已拒绝扫描: {', '.join(bad)}"
+                         "（本工具只允许扫 RFC1918 私网段，与网段护栏同规）",
+                "local_ip": local_ip}, ensure_ascii=False))
+            return 1
+        if not checked:
+            print(json.dumps({"error": "--hosts 解析后为空", "local_ip": local_ip},
+                             ensure_ascii=False))
+            return 1
+        hosts = checked
 
     t0 = time.time()
     sys.stderr.write(f"[lan] 扫描 {net} 的 {len(hosts)} 主机 × {len(ports)} 端口"

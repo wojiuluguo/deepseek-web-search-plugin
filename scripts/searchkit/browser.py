@@ -261,6 +261,10 @@ def run_search(query: str, max_results: int, engines: List[str], proxy: str = ""
         except Exception:
             pass
     results = _dedupe(all_results)[:max_results * 3]
+    # S2 净化（2026-10-15，BUGS.md 同步）：与 dispatch 同款——聚合源头剥离
+    # 隐形/控制字符（浏览器抓取的渲染文本同样可被埋零宽指令）
+    from .sanitize import sanitize_results
+    results = sanitize_results(results)
     out = {
         "query": query,
         "results": results,

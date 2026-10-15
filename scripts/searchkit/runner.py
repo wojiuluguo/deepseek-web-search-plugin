@@ -11,16 +11,39 @@
 （browser=True 时才惰性 import searchkit.browser 取可用引擎表数引擎数）。"""
 
 import json
+import os
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from typing import Dict, List, Optional, Union
 
-__all__ = ["run_search_cli", "auto_timeout"]
+__all__ = ["run_search_cli", "auto_timeout", "start_global_timeout"]
 
 _SCRIPTS_DIR = Path(__file__).resolve().parent.parent
 _SEARCH_LW = _SCRIPTS_DIR / "search.py"
 _SEARCH_BR = _SCRIPTS_DIR / "search_browser.py"
+
+
+def start_global_timeout(seconds: int) -> None:
+    """全局看门狗（v1.24.0 引入，v1.25.1 上收为调度器公共件）：整条命令的墙钟上限。
+    chain 各步单独有界但总和无界（压测实锤：网易云歌曲页 15 分钟零输出挂死，
+    进程低 CPU 纯等待）——AI Agent/脚本调用方需要一个"必然结束"的保证。
+    触发即 stderr 告知 + os._exit(1)：跳过正常收尾（挂死场景下清理本就无从谈起；
+    Playwright driver 检测到管道关闭会带走无头浏览器）。0 = 关闭（默认，旧行为不变）。
+    供各 CLI 门面（auto_save_browser / search_browser）共用，不再各自留副本。"""
+    if seconds <= 0:
+        return
+
+    def _fire():
+        sys.stderr.write(f"\n[timeout] 全局看门狗：整条命令超过 {seconds}s 未完成，强制退出"
+                         "（chain 各步有界但总和无界——这就是『必然结束』保证）\n")
+        sys.stderr.flush()
+        os._exit(1)
+
+    t = threading.Timer(seconds, _fire)
+    t.daemon = True
+    t.start()
 
 
 def auto_timeout(n_engines: int, browser: bool) -> int:
@@ -132,5 +155,11 @@ def run_search_cli(
     except Exception:
         envelope["error"] = "stdout not JSON"
         return envelope
-    envelope["ok"] = True
+    # S1 修复（2026-10-15，BUGS.md 同步）：ok 必须 tie 到 returncode——此前无条件
+    # True，子进程 rc=0 却空 stdout（or "{}" 兜底）或 rc≠0 但碰巧输出合法 JSON 时，
+    # data={} 被当成功下发，消费方 data["results"] 直接 KeyError（子服务同源 P1 实锤
+    # 3/3 复现）。rc≠0 但有 JSON 时补 error 说明，消费方 smart_search 据此走占位分支。
+    envelope["ok"] = proc.returncode == 0
+    if not envelope["ok"] and not envelope["error"]:
+        envelope["error"] = f"subprocess exit {proc.returncode}"
     return envelope

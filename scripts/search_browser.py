@@ -99,7 +99,18 @@ def main(argv=None):
         "--no-resolve", action="store_true",
         help="跳过跳转壳解码（v1.25.0 默认解码：跳转壳链接跟随还原为真实 URL；失败自动保留原壳）",
     )
+    parser.add_argument(
+        "--timeout", type=int, default=0, metavar="秒",
+        help="全局看门狗（v1.25.1 补齐，与 auto_save_browser 同款语义）：整条命令超过 N 秒未完成"
+             "强制退出（默认 0=关闭）。浏览器路线各步有界但总和无界，AI Agent/脚本调用"
+             "建议统一带 --timeout 600。超时强退输出 [timeout] 标记并 exit 1",
+    )
     args = parser.parse_args(argv)
+
+    # v1.25.1：看门狗在解析后立即挂钟（Driver 突死 page.goto 挂起场景的进程级兜底；
+    # 单引擎异常不升级为整轮挂死——审计质疑③的顶层 CLI 补齐）
+    from searchkit.runner import start_global_timeout
+    start_global_timeout(args.timeout)
 
     query = (args.query or args.query_pos or "").strip()
     if not query:

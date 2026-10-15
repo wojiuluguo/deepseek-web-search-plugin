@@ -1,8 +1,8 @@
 ---
 name: deepseek-web-search
 description: DeepSeek 联网搜索技能。遇到实时信息、事实核查、新闻、价格、代码报错、未知名词或用户说“搜一下”时，必须使用本技能搜索并附来源。
-version: 1.25.0
-updated: 2026-09-28
+version: 1.25.2
+updated: 2026-10-15
 author: user（抖音号: 94636651553）
 license: MIT
 tags: [web, search, deepseek, 联网, 搜索]
@@ -34,7 +34,7 @@ tags: [web, search, deepseek, 联网, 搜索]
 | 网站可疑/怕挖矿病毒/保护本机 | 任何命令加 `--safe`（安全模式） |
 | 浏览器被识别成机器人/风控拦截 | 默认已全套伪装（`--stealth full`）；仍被拦的强风控站（搜狗 antispider）属 IP/行为层风控，换引擎或加 `--profile` 养登录态 |
 | 登录一次以后免登录（豆包/抖音/B站网页版等） | 任意命令加 `--profile`：固定浏览器用户目录，登录态跨会话保留；首次配 `--method vision --profile --headed` 人肉登录一次 |
-| 防"无限挂死"（AI Agent 必看） | 任意命令加 `--timeout 600`（v1.24.0 全局看门狗：chain 各步有界但总和无界，加了这条整条命令必然结束，超时打 [timeout] 标记 exit 1） |
+| 防"无限挂死"（AI Agent 必看） | 任意命令加 `--timeout 600`（v1.24.0 全局看门狗：chain 各步有界但总和无界，加了这条整条命令必然结束，超时打 [timeout] 标记 exit 1。**v1.25.1 起 search_browser.py 浏览器搜索也支持**，与下载命令同款语义） |
 | 自己的本地索引 | `own_search.py search` |
 | 看页面长什么样（多模态模型专用） | 任意命令加 `--screenshot`：整页截图(PNG)+屏幕信息喂给视觉模型 |
 | 像人一样看着屏幕操作页面（多模态专用） | `auto_save_browser.py --url ... --method vision`：截图+鼠标键盘控制会话 |

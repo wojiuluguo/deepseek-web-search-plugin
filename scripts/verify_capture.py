@@ -58,14 +58,6 @@ TINY_IMAGE_BYTES = 150 * 1024   # 与抓取端 _is_junk_resource 同阈值
 TINY_AUDIO_BYTES = 30 * 1024
 
 
-def _md5_file(path: Path) -> str:
-    h = hashlib.md5()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
 def _md5_url(url: str, timeout: int = 60) -> Optional[str]:
     req = urllib.request.Request(url, headers={
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -288,6 +280,17 @@ def _fmt_report(r: Dict) -> str:
     return "\n".join(lines)
 
 
+def _within_downloads(path: Path) -> bool:
+    """v1.25.1 审计修复（质疑①）：破坏性操作（--clean/--assemble）只允许作用于
+    本项目 downloads/ 树内的产物目录——工具定位是清理自己抓的产物，不是通用
+    清理器；越界目录（相册/系统目录）一律拒绝，防不可逆误删用户真实文件。"""
+    downloads_root = (Path(__file__).resolve().parent.parent / "downloads").resolve()
+    try:
+        return path.resolve().is_relative_to(downloads_root)
+    except (ValueError, OSError):
+        return False
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(
         description="Verify Capture: 浏览器抓包产物事后校验（真实解码裁决正片/垃圾/虚标/坏文件）"
@@ -307,7 +310,15 @@ def main(argv=None):
         return 0
 
     if args.assemble:
-        out = assemble_segments(Path(args.assemble).expanduser().resolve())
+        seg_dir = Path(args.assemble).expanduser().resolve()
+        # v1.25.1 审计修复（质疑①）：--assemble 会删除分段文件，目录必须在本工具
+        # 管辖的 downloads/ 树内——防止误把任意目录当分段目录清掉
+        if not _within_downloads(seg_dir):
+            print("拒绝执行：--assemble 目录必须在项目 downloads/ 树内"
+                  f"（本工具只清理自己抓取的产物，不做通用清理器）: {seg_dir}",
+                  file=sys.stderr)
+            return 2
+        out = assemble_segments(seg_dir)
         if args.json:
             print(json.dumps(out, ensure_ascii=False, indent=2))
         else:
@@ -323,6 +334,15 @@ def main(argv=None):
     if not target.is_dir():
         print(json.dumps({"error": f"目录不存在: {target}"}) if args.json else f"目录不存在: {target}",
               file=sys.stderr)
+        return 2
+    # v1.25.1 审计修复（质疑①·高·破坏性）：--clean 会递归 unlink"垃圾"文件，
+    # 而 junk 判定含"图片<150KB"——对任意目录（如相册 P:\Photos）执行会不可逆
+    # 删除用户真实小图。本工具定位是校验/清理 downloads/ 抓取产物，目录必须在
+    # downloads/ 树内，越界一律拒绝（--clean 与 --assemble 同规）。
+    if (args.clean or args.assemble) and not _within_downloads(target):
+        msg = (f"拒绝 --clean：目录必须在项目 downloads/ 树内（防误删任意目录中的"
+               f"小图等真实文件——junk 判定含图片<150KB）: {target}")
+        print(json.dumps({"error": msg}) if args.json else msg, file=sys.stderr)
         return 2
 
     report = scan_dir(target)

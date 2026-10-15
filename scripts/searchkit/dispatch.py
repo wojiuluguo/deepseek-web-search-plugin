@@ -18,6 +18,7 @@ from .engines import CATEGORY_ENGINES, DOMESTIC_FIRST, ENGINES
 from .http import DEFAULT_ENGINES, CaptchaError, NotConfiguredError
 from .normalize import _dedupe
 from .resolve import resolve_shell_urls
+from .sanitize import sanitize_results
 
 __all__ = ["_resolve_engines", "run_search", "_format_plain"]
 
@@ -112,6 +113,9 @@ def run_search(query: str, max_results: int, engines: List[str], timeout: int,
         except Exception as exc:
             sys.stderr.write(f"[resolve] 跳过壳解码: {exc}\n")
     results = _dedupe(all_results)[:max_results * 3]
+    # S2 净化（2026-10-15，BUGS.md 同步）：聚合源头剥离隐形/控制字符——
+    # 下游 _format_plain×N 与 --json 全部自动干净（架构说明见 sanitize.py 头注）
+    results = sanitize_results(results)
     return {
         "query": query,
         "results": results,
@@ -122,9 +126,12 @@ def run_search(query: str, max_results: int, engines: List[str], timeout: int,
 
 def _format_plain(data: Dict) -> str:
     lines = []
-    results = data["results"]
+    # S1 修复（2026-10-15，BUGS.md 同步）：.get 兜底——runner envelope data={} 时
+    # 不再 KeyError（子服务同源 P1）；并对齐衍生项目 QA-1：空结果如实报引擎异常
+    results = data.get("results") or []
     if not results:
-        return "没有搜索到结果。可尝试换关键词或稍后再试。"
+        errs = data.get("engine_errors") or ""
+        return f"没有搜索到结果。可尝试换关键词或稍后再试。{(' 引擎异常: ' + str(errs)) if errs else ''}"
     lines.append(f"共 {len(results)} 条结果（引擎统计: {data.get('engine_stats', {})}）")
     if data.get("engine_errors"):
         lines.append(f"引擎异常: {data['engine_errors']}")

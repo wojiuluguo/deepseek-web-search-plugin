@@ -558,24 +558,10 @@ def _append_manifest(output_dir: Path, data: Dict) -> None:
 
 
 def _start_global_timeout(seconds: int) -> None:
-    """全局看门狗（v1.24.0）：整条命令的墙钟上限。chain 各步单独有界但总和
-    无界（v1.23.3 压测实锤：网易云歌曲页 15 分钟零输出挂死，进程低 CPU 纯
-    等待）——AI Agent/脚本调用方需要一个"必然结束"的保证。触发即 stderr
-    告知 + os._exit(1)：跳过正常收尾（挂死场景下清理本就无从谈起；
-    Playwright driver 检测到管道关闭会带走无头浏览器）。0 = 关闭（默认，
-    旧行为不变）。"""
-    if seconds <= 0:
-        return
-
-    def _fire():
-        sys.stderr.write(f"\n[timeout] 全局看门狗：整条命令超过 {seconds}s 未完成，强制退出"
-                         "（chain 各步有界但总和无界——这就是『必然结束』保证）\n")
-        sys.stderr.flush()
-        os._exit(1)
-
-    t = threading.Timer(seconds, _fire)
-    t.daemon = True
-    t.start()
+    """全局看门狗（v1.24.0）：v1.25.1 起实现上收至 searchkit.runner 共享
+    （消灭门面副本——DeepSeek 4.1 审计质疑⑦），本函数仅保留旧名兼容。"""
+    from searchkit.runner import start_global_timeout as _impl
+    _impl(seconds)
 
 
 def main(argv=None):
