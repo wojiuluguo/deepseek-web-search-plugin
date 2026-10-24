@@ -1913,6 +1913,15 @@ def _files_route(
     _stage("files:开始")
     base = {"mode": "url", "source_url": url, "output_dir": str(output_dir), "method": "files"}
 
+    # 安全模式预检（v1.25.3）：safe 落盘白名单拒绝（非媒体/txt/json 扩展名）时
+    # 直接给真实原因——旧行为先下再被拒，最终把失败笼统报成"链接失效/TLS 被拦/
+    # 是网页"（实测 --safe 下 .gz/.zip 全被白名单拦，用户误判成死链）。
+    if safe and urllib.parse.urlparse(url).path.lower().endswith(FILE_EXTS):
+        _safe_reason = _safe_save_reason(urllib.parse.urlparse(url).path, 0)
+        if _safe_reason:
+            return {**base, "saved": [], "count": 0,
+                    "error": f"safe mode 拒绝: {_safe_reason}"}
+
     # 1) 文件直链（两招阶梯：urllib 流式 → Chromium 指纹，治 JA3 拦截）
     if urllib.parse.urlparse(url).path.lower().endswith(FILE_EXTS):
         item = _file_direct_download(url, output_dir, safe)

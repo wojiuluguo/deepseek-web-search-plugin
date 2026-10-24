@@ -6,7 +6,8 @@
 ## 版本时间轴
 
 ```text
-                     ┌─ 10月 ─● v1.25.2  当前版本（2026-10-15）
+                     ┌─ 10月 ─● v1.25.3  当前版本（2026-10-24）
+                     │        ○ v1.25.2  同步裁决 + 隐形字符净化
                      │        ○ v1.25.1  外部审计裁决
    2026 ─────────────┼─ 09月 ─● v1.25.0  搜索压测优化
    （由新到旧）       │        ○ v1.24.1  下载专项修复
@@ -26,6 +27,7 @@
 ```
 
 ```text
+ v1.25.3 ●━ 10月   全量实测回归：--assemble 崩溃修复（从未可用） · safe 报错修复
  v1.25.2 ●━ 10月   同步裁决：ok 绑定 returncode · 隐形字符净化
  v1.25.1 ●━ 10月   外部审计 8 条：4 修 · 4 搁置留证
  v1.25.0 ●━ 09月   搜索压测：壳解码 · 并发 2.2x · 局域网搜索
@@ -51,6 +53,7 @@
 
 | 版本 | 日期 | 类型 | 一句话摘要 |
 |---|---|---|---|
+| v1.25.3 | 10-24 | 修复 | 全量实测回归（搜索/下载/校验）：`verify_capture --assemble` set\|tuple TypeError 修复（该功能自首个提交起从未可用）；safe 模式拒绝归档改报真实原因；实跑覆盖文件/视频/音频/图集/小说/文件夹/zip/yt-dlp/校验/本地索引/视觉 |
 | v1.25.2 | 10-15 | 安全·修复 | 子服务同步清单裁决：S1 envelope ok 绑定 returncode；S2 隐形字符净化移植并接线聚合源头；S3 验收落地；21 项新测试 |
 | v1.25.1 | 10-04 | 安全·修复 | 外部审计 8 条裁决：4 确证修复（删除护栏 / URL 白名单双层设防 / 浏览器看门狗 / 死代码）、4 搁置留证 |
 
@@ -91,6 +94,22 @@
 | v1.12.4 | 08-22 | 修复 | 视觉会话全面修复 + 12 项关键 bug（含未单独发版的 v1.12.2~3 内部迭代） |
 
 ## 详细记录
+
+### v1.25.3（2026-10-24）
+
+旧功能全量实测回归（起因："以前那些功能没有用，还会出问题"）。确认 2 个 bug 并修复（含可复现证据），其余全部通过，或失败原因经实测定性为环境问题。
+
+- **修复（高·崩溃）：`verify_capture.py --assemble` 从未可用过**——`files = [... if p.suffix.lower() in VIDEO_EXTS | AUDIO_EXTS]`：`VIDEO_EXTS` 是 `set`、`AUDIO_EXTS` 是 `tuple`，`set | tuple` 在读任何文件之前就抛 `TypeError: unsupported operand type(s) for |: 'set' and 'tuple'`。证据链：①实跑 `--assemble downloads/_assemble_probe` 在 verify_capture.py:212 直接 traceback；②git 历史：该表达式从首个提交 `b8e7b4d`（v1.11.1）就在，常量类型从未变过——该功能在所有已发布版本中从未工作；③改为 `VIDEO_EXTS | set(AUDIO_EXTS)` 后，同一目录 4 段成功组装为 110.01s 成品（ffmpeg 真解码验证）。回归用例已加入 tests/test_audit_fixes.py。
+- **修复（低·诊断）：safe 模式拒绝归档时谎报原因**——`--safe` 下归档（`.gz/.zip` 等）被落盘白名单（`SAFE_ALLOWED_EXTS` = 媒体 + txt/json）拒绝，但 `_files_route` 最终笼统报 `"file direct download failed (link dead / TLS-blocked / is a webpage)"`，把"白名单拒绝"误导成"死链"。现在 `_files_route` 先做白名单预检，直接返回 `safe mode 拒绝: 非白名单扩展名 .gz`；非 safe 下载行为不变。新增 2 项回归断言。
+- **实测矩阵（到底测了什么）**：
+  - 搜索：轻量版 `--json/--brief/--site/--category all/--engines/--ad-filter none/--precision 100/--no-resolve`；浏览器版 `--json/--brief/--site/--stealth off/--timeout`；smart_search（普通 + `--browser`）；cross_search（`--json`、`--mega --copies 1 --rounds 1`）；API 引擎无 Key（tavily/brave/searxng 均如实报 `set XXX_API_KEY`）。
+  - 下载：文件直链（8.7MB tar.gz，2s，quality=full）、B站视频 chain（`quality=full`，15.6s）、yt-dlp `--quality 480p`（13.4MB）与 `--extract-audio mp3`（2.2MB）、音频直链、图集 harvest（本地夹具 6/6；250 张夹具精确封顶 200）、懒加载 `data-src` 图集 4/4、小说目录逐章合并 6/6（4717 字节 txt）、文件夹页批量（2/2）、`--zip` 打包（解压校验条目完整）、`--safe` 拦截行为、`--query --auto` 搜索后下载、截图、正文提取。
+  - 校验：`--dir` 扫描、`--clean`、`--clean --keep-broken`（垃圾删、坏文件留）、`--recheck`（MD5 两次一致）、`--assemble`（修复后通过）。
+  - own_search：`crawl` → `search`、`seed`、`lan`（私网护栏）、`stats`、`download` 透传；`file://` 被拒；`--hosts 8.8.8.8` 被拒。
+  - 视觉：`test_vision_e2e.py` 12/12（elements/iframe 点击/对话框接受与取消/上传）+ 离线检查。
+  - 负向：不存在的 cookies 文件（如实警告 + exit 1）、死代理（由看门狗兜底）、不存在的目录（exit 2）、把图片页当视频要（如实空手）。
+- **环境问题、非产品 bug（已留证）**：w3.org SSL 握手超时（130s）与 zh.wikipedia 连接超时——网络墙；SoundHelix mp3 实测仅 ~11KB/s（curl 60s 只下 655KB），8.9MB 文件本来就下不完——服务器限速；用 Hermes venv 的 Python（无 playwright）跑测试会导致 vision/看门狗用例失败——项目 `.venv` 下 10 文件全绿。
+- **套件**：tests/run_all.py **10 文件全绿**（审计文件现 25 项断言）。
 
 ### v1.25.2（2026-10-15）
 

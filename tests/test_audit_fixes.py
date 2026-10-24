@@ -49,6 +49,19 @@ check("_within_downloads: 外部目录为 False",
 check("_within_downloads: 相似前缀目录不算（防 is_relative_to 绕过争议）",
       not _vc._within_downloads(ROOT / "downloads_evil" / "x"))
 
+# assemble 回归（v1.25.3）：VIDEO_EXTS 是 set、AUDIO_EXTS 是 tuple，旧 `set|tuple`
+# 必抛 TypeError（--assemble 从上线起不可用）。用 downloads 内临时目录构造视频/音频
+# 分段，断言不再抛类型异常（内容非法时允许 ok=False，但必须是正常 dict 返回）。
+with tempfile.TemporaryDirectory(dir=ROOT / "downloads") as td:
+    seg = Path(td)
+    for n in ("s1.mp4", "s2.mp4", "s3.mp3"):
+        (seg / n).write_bytes(b"not-a-real-media" * 10)
+    try:
+        res = _vc.assemble_segments(seg)
+        check("assemble 不再 set|tuple TypeError", isinstance(res, dict) and "ok" in res, str(res)[:120])
+    except TypeError as exc:
+        check("assemble 不再 set|tuple TypeError", False, f"TypeError: {exc}")
+
 # CLI 级：外部目录 --clean 必须被拒且文件原样保留
 with tempfile.TemporaryDirectory() as td:
     victim = Path(td) / "tiny.png"
@@ -115,6 +128,15 @@ check("看门狗关闭(0): 不触发", subprocess.run(
 
 print("== ⑧ 死代码已删 ==")
 check("verify_capture._md5_file 不复存在", not hasattr(_vc, "_md5_file"))
+
+print("== ⑨ safe 拒绝原因（v1.25.3） ==")
+# --safe 落盘白名单拒绝归档时，错误必须是真实原因——旧行为笼统报
+# "链接失效/TLS 被拦/是网页"，用户会把白名单拒绝误判成死链。
+from auto_save.routes import _files_route  # noqa: E402
+_res = _files_route("http://127.0.0.1:9/probe.zip", ROOT / "downloads" / "_safe_msg_test", safe=True)
+check("safe 拒绝归档: 报错含'safe mode 拒绝'", "safe mode 拒绝" in (_res.get("error") or ""),
+      str(_res)[:120])
+check("safe 拒绝归档: 不谎报链接失效", "link dead" not in (_res.get("error") or ""))
 
 print(f"\n== 结果: {passed} pass / {failed} fail ==")
 sys.exit(1 if failed else 0)

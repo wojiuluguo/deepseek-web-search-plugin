@@ -6,7 +6,8 @@ Chinese version: [CHANGELOG.zh-CN.md](CHANGELOG.zh-CN.md). Feature docs: [README
 ## Version Timeline
 
 ```text
-                     ┌─ Oct ─● v1.25.2  current (2026-10-15)
+                     ┌─ Oct ─● v1.25.3  current (2026-10-24)
+                     │        ○ v1.25.2  sync verdict + sanitization
                      │        ○ v1.25.1  external-audit verdicts
    2026 ─────────────┼─ Sep ─● v1.25.0  search stress & optimization
    (newest first)    │        ○ v1.24.1  download-pipeline fixes
@@ -26,6 +27,7 @@ Chinese version: [CHANGELOG.zh-CN.md](CHANGELOG.zh-CN.md). Feature docs: [README
 ```
 
 ```text
+ v1.25.3 ●━ Oct   full live regression: --assemble crash fixed (never worked) · safe error fixed
  v1.25.2 ●━ Oct   sync verdict: ok bound to returncode · invisible-char sanitization
  v1.25.1 ●━ Oct   external audit 8 suspects: 4 fixed · 4 shelved with evidence
  v1.25.0 ●━ Sep   search stress: shell resolution · 2.2x concurrency · LAN search
@@ -51,6 +53,7 @@ Chinese version: [CHANGELOG.zh-CN.md](CHANGELOG.zh-CN.md). Feature docs: [README
 
 | Version | Date | Type | Summary |
 |---|---|---|---|
+| v1.25.3 | 10-24 | Fix | Full live regression across search/download/verify: `verify_capture --assemble` set\|tuple TypeError fixed (feature never worked since the first commit); safe-mode rejection now reports the real reason; live matrix covered file/video/audio/image/novel/folder/zip/yt-dlp/verify/own_search/vision |
 | v1.25.2 | 10-15 | Security·Fix | Sub-service sync-list verdict: S1 envelope `ok` bound to returncode; S2 invisible-character sanitization ported & wired at the aggregation source; S3 acceptance landed; 21 new tests, suite 10 files all green |
 | v1.25.1 | 10-04 | Security·Fix | External audit, 8 suspects: 4 confirmed & fixed (deletion guard / URL whitelist double-guard / browser watchdog / dead code), 4 shelved with evidence |
 
@@ -91,6 +94,22 @@ Chinese version: [CHANGELOG.zh-CN.md](CHANGELOG.zh-CN.md). Feature docs: [README
 | v1.12.4 | 08-22 | Fix | Vision session overhaul + 12 critical bug fixes (incl. previously unreleased v1.12.2~3 internal iterations) |
 
 ## Detailed Entries
+
+### v1.25.3 (2026-10-24)
+
+Full live regression across legacy search/download/verify features (prompted by "old features may still break"). Two confirmed bugs, fixed with reproducible evidence; everything else passed or failed only for environmental reasons.
+
+- **Fixed (high, crash): `verify_capture.py --assemble` was never functional** — `files = [... if p.suffix.lower() in VIDEO_EXTS | AUDIO_EXTS]`: `VIDEO_EXTS` is a `set`, `AUDIO_EXTS` is a `tuple`, so the expression raises `TypeError: unsupported operand type(s) for |: 'set' and 'tuple'` **before reading any file**. Proof: (1) running `--assemble downloads/_assemble_probe` produced the traceback at verify_capture.py:212; (2) git history shows the same expression in the very first commit `b8e7b4d` (v1.11.1) while the constant types never changed — the feature has never worked in any release; (3) after `VIDEO_EXTS | set(AUDIO_EXTS)`, the same directory assembled 4 segments into a 110.01s file (ffmpeg real-decode verified). Regression check added to tests/test_audit_fixes.py.
+- **Fixed (low, diagnostics): safe-mode rejection lied about the cause** — with `--safe`, archives (`.gz/.zip/...`) are refused by the on-disk whitelist (`SAFE_ALLOWED_EXTS` = media + txt/json), but `_files_route` fell through to the generic `"file direct download failed (link dead / TLS-blocked / is a webpage)"`, so a whitelist refusal looked like a dead link. Now `_files_route` pre-checks the whitelist and reports `safe mode 拒绝: 非白名单扩展名 .gz`; normal (non-safe) downloads unchanged. Two regression checks added.
+- **Live test matrix (what was tested)**:
+  - Search: lightweight `--json/--brief/--site/--category all/--engines/--ad-filter none/--precision 100/--no-resolve`, browser search (`--json/--brief/--site/--stealth off/--timeout`), smart_search (plain + `--browser`), cross_search (`--json`, `--mega --copies 1 --rounds 1`), API engines without keys (tavily/brave/searxng correctly report `set XXX_API_KEY`).
+  - Downloads: direct file (8.7MB tar.gz, 2s, quality=full), Bilibili video via chain (`quality=full`, 15.6s), yt-dlp `--quality 480p` (13.4MB) and `--extract-audio mp3` (2.2MB), direct audio, image gallery harvest (local fixture 6/6; 250-image fixture capped at exactly 200), lazy `data-src` gallery 4/4, novel TOC chapter merge 6/6 (4717-byte txt), folder page batch (2/2 files), `--zip` bundle (zip entries verified intact), `--safe` block behavior, `--query --auto` search-then-download, screenshot, text extraction.
+  - Verify: `--dir` scan, `--clean`, `--clean --keep-broken` (junk deleted, broken kept), `--recheck` (MD5 stable), `--assemble` (fixed).
+  - own_search: `crawl` → `search`, `seed`, `lan` (private-IP guard), `stats`, `download` passthrough; `file://` rejected; `--hosts 8.8.8.8` rejected.
+  - Vision: `test_vision_e2e.py` 12/12 (elements/iframe click/dialog accept-dismiss/upload) + offline checks.
+  - Negative: nonexistent cookies file (honest warning + exit 1), dead proxy (bounded by watchdog), nonexistent dir (exit 2), page requested as video (honest empty).
+- **Environment-caused failures, not product bugs (evidence recorded)**: w3.org SSL handshake timeout (130s) and zh.wikipedia connection timeout — network walls; SoundHelix mp3 only ~11KB/s (curl measured 655KB/60s), so an 8.9MB file cannot finish quickly — server throttling; running tests with the Hermes venv Python (no playwright) made vision/timeout tests fail — the project `.venv` passes all 10 files.
+- **Suite**: tests/run_all.py **10 files all green** (audit file now 25 checks).
 
 ### v1.25.2 (2026-10-15)
 

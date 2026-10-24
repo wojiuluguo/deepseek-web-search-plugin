@@ -209,7 +209,10 @@ def assemble_segments(seg_dir: Path) -> Dict:
     只装体量最大的同扩展名组，装完解码验证，不通过就删掉不留坏文件。"""
     if not _ffmpeg_path():
         return {"ok": False, "error": "无 ffmpeg，无法重组装"}
-    files = [p for p in seg_dir.iterdir() if p.is_file() and p.suffix.lower() in VIDEO_EXTS | AUDIO_EXTS]
+    # 类型修复（v1.25.3）：VIDEO_EXTS 是 set、AUDIO_EXTS 是 tuple——`set | tuple`
+    # 直接 TypeError（--assemble 从上线起必崩，实测 traceback 100% 复现）。
+    files = [p for p in seg_dir.iterdir()
+             if p.is_file() and p.suffix.lower() in VIDEO_EXTS | set(AUDIO_EXTS)]
     if len(files) < 2:
         return {"ok": False, "error": f"分段不足({len(files)}个),无需组装"}
 

@@ -4,7 +4,7 @@ English | **[中文](README.zh-CN.md)**
 
 An [OpenClaw](https://github.com/openclaw) skill that gives DeepSeek real web search **and** an auto-save browser that downloads videos/audio/images/files from any webpage it opens — plus a vision mode for multimodal models (see a page, operate a page).
 
-> Current version **v1.25.2** (2026-10-15) · Author: user (Douyin ID: 94636651553) · [Changelog](#changelog)
+> Current version **v1.25.3** (2026-10-24) · Author: user (Douyin ID: 94636651553) · [Changelog](CHANGELOG.md)
 
 <p align="center"><img src="assets/mascot.png" alt="deepseek-web-search mascot" width="220"></p>
 
@@ -237,9 +237,9 @@ deepseek-web-search-plugin/
 
 > Full history (version timeline + monthly index + all detailed entries) in **[CHANGELOG.md](CHANGELOG.md)** (entries written in Chinese). Recent 3 releases:
 
+- **v1.25.3** (2026-10-24) fix — full live regression of legacy features: `verify_capture --assemble` set|tuple TypeError fixed (never worked since the first commit; 4 segments now assemble into a 110.01s verified file); safe-mode rejections report the real cause; live matrix covered search / files / video / audio / galleries / novels / folders / zip / yt-dlp / verify / local index / vision
 - **v1.25.2** (2026-10-15) security/fix — sub-service sync-list verdict: envelope `ok` bound to returncode, invisible-character sanitization wired at the aggregation source, S3 acceptance landed; 21 new tests, suite 10 files all green
 - **v1.25.1** (2026-10-04) security/fix — external audit, 8 suspects: 4 confirmed & fixed (verify_capture deletion guard / own_search URL whitelist double-guard / search_browser --timeout watchdog / dead code), 4 shelved with evidence
-- **v1.25.0** (2026-09-28) perf/features — full search stress round: redirect-shell resolution, 4-way engine concurrency 2.2x, browser-death protection, 31-engine census, LAN search, --site suffix-matching fix
 
 ## License
 

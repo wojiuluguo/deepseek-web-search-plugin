@@ -1,8 +1,8 @@
 ---
 name: deepseek-web-search
 description: DeepSeek 联网搜索技能。遇到实时信息、事实核查、新闻、价格、代码报错、未知名词或用户说“搜一下”时，必须使用本技能搜索并附来源。
-version: 1.25.2
-updated: 2026-10-15
+version: 1.25.3
+updated: 2026-10-24
 author: user（抖音号: 94636651553）
 license: MIT
 tags: [web, search, deepseek, 联网, 搜索]
