@@ -4,7 +4,7 @@
 
 OpenClaw Skill：让 DeepSeek 模型能搜索、会搜索、并且"该搜就搜"，还能自动下载网页里的视频/音频/图片/文件，多模态模型还能"看页面+操作页面"。
 
-> 当前版本 **v1.25.3**（2026-10-24）· 作者：user（抖音号: 94636651553）· [完整更新记录](CHANGELOG.zh-CN.md)
+> 当前版本 **v1.25.4**（2026-10-25）· 作者：user（抖音号: 94636651553）· [完整更新记录](CHANGELOG.zh-CN.md)
 
 <p align="center"><img src="assets/mascot.png" alt="deepseek-web-search 吉祥物" width="220"></p>
 
@@ -239,9 +239,9 @@ deepseek-web-search-plugin/
 
 > 完整历史（版本时间轴 + 分月索引 + 全部详细记录）见 **[CHANGELOG.zh-CN.md](CHANGELOG.zh-CN.md)**（英文版 [CHANGELOG.md](CHANGELOG.md)）。以下仅列最近 3 版摘要。
 
+- **v1.25.4**（2026-10-25）修复 — 按 BUGS.md 同步清单补齐 S6：Python 子进程强制 UTF-8 环境，修复中文 Windows GBK 管道遇 `\xa0` 的偶发崩溃；`child_env()` 收口接入 runner / own_search download / search_and_cache；9 项回归，套件 11 文件全绿
 - **v1.25.3**（2026-10-24）修复 — 旧功能全量实测回归：`verify_capture --assemble` 的 set|tuple TypeError 修复（该功能自首个提交起从未可用，实跑 4 段→110.01s 成品）；safe 拒绝归档改报真实原因；实跑覆盖搜索/文件/视频/音频/图集/小说/文件夹/zip/yt-dlp/校验/本地索引/视觉
 - **v1.25.2**（2026-10-15）安全·修复 — 子服务同步清单裁决：envelope ok 绑定 returncode、隐形字符净化接线聚合源头、S3 验收落地；新增 21 项测试，套件 10 文件全绿
-- **v1.25.1**（2026-10-04）安全·修复 — 外部审计 8 条裁决：4 确证修复（verify_capture 删除护栏 / own_search URL 白名单双层设防 / search_browser --timeout 看门狗 / 死代码清理）、4 搁置留证
 
 ## License
 

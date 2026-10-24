@@ -25,6 +25,10 @@ from typing import Dict, List
 BASE_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_CACHE_DIR = BASE_DIR / "downloads" / "cache" / "search_cache"
 
+# S6 同步（v1.25.4）：子进程 JSON stdout 强制 UTF-8，防中文 Windows GBK 管道
+# 在结果含 \xa0 等字符时 UnicodeEncodeError（时好时坏）。
+from searchkit.runner import child_env  # noqa: E402
+
 
 def run_search(query: str, max_results: int, browser: bool, safe: bool = False) -> Dict:
     script = BASE_DIR / "scripts" / "smart_search.py"
@@ -49,6 +53,7 @@ def run_search(query: str, max_results: int, browser: bool, safe: bool = False) 
             encoding="utf-8",
             errors="ignore",
             timeout=300,  # smart_search 多轮分类最坏 180s+，120s 会把正常轮次杀掉
+            env=child_env(),
         )
     except subprocess.TimeoutExpired:
         return {"results": [], "summary": f"搜索超时(>{300}s)：{query[:50]}"}
@@ -85,6 +90,7 @@ def cache_url(url: str, cache_dir: Path, method: str, media_type: str = "", safe
             encoding="utf-8",
             errors="ignore",
             timeout=300,  # chain 内部 --max-wait 默认就 180s+滚动收割合并，180s 必超
+            env=child_env(),
         )
     except subprocess.TimeoutExpired:
         return {"error": f"缓存超时(>300s)：{url[:80]}", "_url": url}

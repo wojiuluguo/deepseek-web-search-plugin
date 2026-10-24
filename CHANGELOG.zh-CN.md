@@ -6,7 +6,8 @@
 ## 版本时间轴
 
 ```text
-                     ┌─ 10月 ─● v1.25.3  当前版本（2026-10-24）
+                     ┌─ 10月 ─● v1.25.4  当前版本（2026-10-25）
+                     │        ○ v1.25.3  旧功能全量回归
                      │        ○ v1.25.2  同步裁决 + 隐形字符净化
                      │        ○ v1.25.1  外部审计裁决
    2026 ─────────────┼─ 09月 ─● v1.25.0  搜索压测优化
@@ -27,6 +28,7 @@
 ```
 
 ```text
+ v1.25.4 ●━ 10月   BUGS.md S6 同步：子进程 UTF-8 环境（GBK 管道崩溃修复）
  v1.25.3 ●━ 10月   全量实测回归：--assemble 崩溃修复（从未可用） · safe 报错修复
  v1.25.2 ●━ 10月   同步裁决：ok 绑定 returncode · 隐形字符净化
  v1.25.1 ●━ 10月   外部审计 8 条：4 修 · 4 搁置留证
@@ -53,6 +55,7 @@
 
 | 版本 | 日期 | 类型 | 一句话摘要 |
 |---|---|---|---|
+| v1.25.4 | 10-25 | 修复 | BUGS.md S6 同步：Python 子进程强制 `PYTHONIOENCODING=utf-8` + `PYTHONUTF8=1`（GBK 管道遇 `\xa0` 的 UnicodeEncodeError 修复）；`child_env()` 收口接入 runner / own_search download / search_and_cache 两处；9 项回归，套件 11 文件 |
 | v1.25.3 | 10-24 | 修复 | 全量实测回归（搜索/下载/校验）：`verify_capture --assemble` set\|tuple TypeError 修复（该功能自首个提交起从未可用）；safe 模式拒绝归档改报真实原因；实跑覆盖文件/视频/音频/图集/小说/文件夹/zip/yt-dlp/校验/本地索引/视觉 |
 | v1.25.2 | 10-15 | 安全·修复 | 子服务同步清单裁决：S1 envelope ok 绑定 returncode；S2 隐形字符净化移植并接线聚合源头；S3 验收落地；21 项新测试 |
 | v1.25.1 | 10-04 | 安全·修复 | 外部审计 8 条裁决：4 确证修复（删除护栏 / URL 白名单双层设防 / 浏览器看门狗 / 死代码）、4 搁置留证 |
@@ -94,6 +97,17 @@
 | v1.12.4 | 08-22 | 修复 | 视觉会话全面修复 + 12 项关键 bug（含未单独发版的 v1.12.2~3 内部迭代） |
 
 ## 详细记录
+
+### v1.25.4（2026-10-25）
+
+同步文档核对轮：v1.25.3 之后重读子服务 BUGS.md 的"主项目同步清单"，发现 **S6**（2026-10-16 新增）被漏掉，本轮补齐并留构造性证据。
+
+- **S1/S2/S3**：v1.25.2 已同步（S2 净化位置有意放在引擎聚合源头而非逐出口，已在当版说明）。
+- **S4/S5**：仅备忘，不改代码（结论维持）。
+- **修复 S6（稳定性）：Python 子进程 GBK 管道崩溃**——`runner.py` 父进程侧写了 `encoding="utf-8"`，但**子进程**在中文 Windows 下仍按 GBK 写 stdout；`search.py`/`search_browser.py` 用 `ensure_ascii=False`，摘要含 `\xa0` 时子进程内抛 `UnicodeEncodeError` → 偶发 `exit 1`（"时好时坏"；本机终端已设 UTF-8 会掩盖）。
+  - **证据**：grep 确认 `scripts/` 下无 `PYTHONIOENCODING`/`PYTHONUTF8`；强制 `PYTHONIOENCODING=gbk, PYTHONUTF8=0` 打印 `\xa0` 复现 `UnicodeEncodeError`（exit 1）；注入新环境后同一代码 exit 0 且 `\xa0` 原样输出。
+  - **修法**：`searchkit/runner.py` 新增公共件 `child_env()`（复制 `os.environ` 后强制 `PYTHONIOENCODING=utf-8` + `PYTHONUTF8=1`，覆盖继承值）。接入全部"解析 Python 子进程 JSON stdout"的位置：`runner.run_search_cli`（覆盖 smart/cross/own_search seed）、`own_search.cmd_download`、`search_and_cache` 两处（`run_search` 与 `cache_url`）。
+  - **回归**：新增 `tests/test_sync_s6.py`——9 项断言（环境语义 / GBK 构造性复现 / child_env 修复 / 三个调用点确实传 env）。套件 **11 文件全绿**。
 
 ### v1.25.3（2026-10-24）
 

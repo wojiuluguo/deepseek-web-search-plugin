@@ -18,11 +18,26 @@ import threading
 from pathlib import Path
 from typing import Dict, List, Optional, Union
 
-__all__ = ["run_search_cli", "auto_timeout", "start_global_timeout"]
+__all__ = ["run_search_cli", "auto_timeout", "start_global_timeout", "child_env"]
 
 _SCRIPTS_DIR = Path(__file__).resolve().parent.parent
 _SEARCH_LW = _SCRIPTS_DIR / "search.py"
 _SEARCH_BR = _SCRIPTS_DIR / "search_browser.py"
+
+
+def child_env() -> Dict[str, str]:
+    """Python 子进程的 UTF-8 强制环境（v1.25.4，BUGS.md S6 同步）。
+
+    症状：中文 Windows 下子进程 stdout 管道默认 GBK；search.py / search_browser.py
+    用 `json.dumps(..., ensure_ascii=False)` 打印结果，网页摘要里的 `\\xa0`
+    等 GBK 外字符会触发 UnicodeEncodeError → 子进程 exit 1。是否命中取决于
+    结果内容，表现为"时好时坏"；本地终端若已设 PYTHONIOENCODING=utf-8 会掩盖。
+    修法：所有调用 Python 子进程并解析其 JSON stdout 的位置统一注入本环境。
+    覆盖继承值（后写优先），确保调用方环境里的 gbk 设置不会被带下去。"""
+    env = dict(os.environ)
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUTF8"] = "1"
+    return env
 
 
 def start_global_timeout(seconds: int) -> None:
@@ -139,6 +154,7 @@ def run_search_cli(
             encoding="utf-8",
             errors="ignore",
             timeout=timeout,
+            env=child_env(),  # S6：子进程强制 UTF-8（防 GBK 管道 UnicodeEncodeError）
         )
     except subprocess.TimeoutExpired:
         envelope["error"] = f"timeout(>{timeout}s)"

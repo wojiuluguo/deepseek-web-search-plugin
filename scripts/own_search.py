@@ -60,7 +60,7 @@ DB_PATH = INDEX_DIR / "own_search.db"
 
 # ---- 归一（v1.22.0 批 E）：搜索子进程调用/超时统一到 searchkit.runner ----
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from searchkit.runner import run_search_cli  # noqa: E402
+from searchkit.runner import run_search_cli, child_env  # noqa: E402
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -356,7 +356,8 @@ def cmd_download(args):
     try:
         # 大文件+chain 多路兜底可能很久，给 30 分钟上限防挂死
         proc = subprocess.run(cmd, capture_output=True, text=True,
-                              encoding="utf-8", errors="ignore", timeout=1800)
+                              encoding="utf-8", errors="ignore", timeout=1800,
+                              env=child_env())  # S6：子进程强制 UTF-8（防 GBK 管道崩溃）
     except subprocess.TimeoutExpired:
         print(json.dumps({"ok": False, "error": "下载超时(>1800s)，已中止"}, ensure_ascii=False))
         return 1

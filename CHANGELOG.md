@@ -6,7 +6,8 @@ Chinese version: [CHANGELOG.zh-CN.md](CHANGELOG.zh-CN.md). Feature docs: [README
 ## Version Timeline
 
 ```text
-                     ┌─ Oct ─● v1.25.3  current (2026-10-24)
+                     ┌─ Oct ─● v1.25.4  current (2026-10-25)
+                     │        ○ v1.25.3  legacy full regression
                      │        ○ v1.25.2  sync verdict + sanitization
                      │        ○ v1.25.1  external-audit verdicts
    2026 ─────────────┼─ Sep ─● v1.25.0  search stress & optimization
@@ -27,6 +28,7 @@ Chinese version: [CHANGELOG.zh-CN.md](CHANGELOG.zh-CN.md). Feature docs: [README
 ```
 
 ```text
+ v1.25.4 ●━ Oct   BUGS.md S6 synced: child-process UTF-8 env (GBK pipe crash fixed)
  v1.25.3 ●━ Oct   full live regression: --assemble crash fixed (never worked) · safe error fixed
  v1.25.2 ●━ Oct   sync verdict: ok bound to returncode · invisible-char sanitization
  v1.25.1 ●━ Oct   external audit 8 suspects: 4 fixed · 4 shelved with evidence
@@ -53,6 +55,7 @@ Chinese version: [CHANGELOG.zh-CN.md](CHANGELOG.zh-CN.md). Feature docs: [README
 
 | Version | Date | Type | Summary |
 |---|---|---|---|
+| v1.25.4 | 10-25 | Fix | BUGS.md S6 synced: Python child processes get `PYTHONIOENCODING=utf-8` + `PYTHONUTF8=1` (GBK pipe `UnicodeEncodeError` on `\xa0` fixed); shared `child_env()` wired into runner + own_search download + search_and_cache (2 calls); 9 regression checks, suite 11 files |
 | v1.25.3 | 10-24 | Fix | Full live regression across search/download/verify: `verify_capture --assemble` set\|tuple TypeError fixed (feature never worked since the first commit); safe-mode rejection now reports the real reason; live matrix covered file/video/audio/image/novel/folder/zip/yt-dlp/verify/own_search/vision |
 | v1.25.2 | 10-15 | Security·Fix | Sub-service sync-list verdict: S1 envelope `ok` bound to returncode; S2 invisible-character sanitization ported & wired at the aggregation source; S3 acceptance landed; 21 new tests, suite 10 files all green |
 | v1.25.1 | 10-04 | Security·Fix | External audit, 8 suspects: 4 confirmed & fixed (deletion guard / URL whitelist double-guard / browser watchdog / dead code), 4 shelved with evidence |
@@ -94,6 +97,17 @@ Chinese version: [CHANGELOG.zh-CN.md](CHANGELOG.zh-CN.md). Feature docs: [README
 | v1.12.4 | 08-22 | Fix | Vision session overhaul + 12 critical bug fixes (incl. previously unreleased v1.12.2~3 internal iterations) |
 
 ## Detailed Entries
+
+### v1.25.4 (2026-10-25)
+
+BUGS.md sync-list compliance round: re-audited the sub-service's "main-project sync list" after v1.25.3 and found **S6** (added 2026-10-16) had been missed. Synced with constructive proof.
+
+- **S1/S2/S3**: already synced in v1.25.2 (S2 sanitization was deliberately placed at the engine aggregation source rather than per-exit, documented in that release).
+- **S4/S5**: memos only, no code change (unchanged verdicts).
+- **Fixed S6 (stability): Python child-process GBK pipe crash** — `runner.py` called `subprocess.run(..., encoding="utf-8")` on the parent side, but the **child** still wrote JSON to a GBK pipe on Chinese Windows; `search.py`/`search_browser.py` use `ensure_ascii=False`, so a snippet containing `\xa0` raised `UnicodeEncodeError` inside the child → intermittent `exit 1` ("works sometimes, fails sometimes"; a terminal already set to UTF-8 masks it locally).
+  - **Proof**: grep showed no `PYTHONIOENCODING`/`PYTHONUTF8` anywhere in `scripts/`; forcing `PYTHONIOENCODING=gbk, PYTHONUTF8=0` and printing `\xa0` reproduced `UnicodeEncodeError` (exit 1); with the new env the same code exits 0 and round-trips `\xa0`.
+  - **Fix**: new shared `child_env()` in `searchkit/runner.py` (copies `os.environ`, then forces `PYTHONIOENCODING=utf-8` + `PYTHONUTF8=1`, overriding inherited values). Wired into the three places that parse a Python child's JSON stdout: `runner.run_search_cli` (covers smart/cross/own_search seed), `own_search.cmd_download`, and both `search_and_cache` calls (`run_search` and `cache_url`).
+  - **Regression**: new `tests/test_sync_s6.py` — 9 checks (env semantics / GBK constructive crash / child_env recovery / all three call sites actually pass `env`). Suite now **11 files, all green**.
 
 ### v1.25.3 (2026-10-24)
 
